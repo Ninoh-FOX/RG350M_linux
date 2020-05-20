@@ -40,10 +40,8 @@
 #include <linux/interrupt.h>
 #include <linux/wait.h>
 
-///
 #include <linux/platform_data/jz4770_fb.h>
 #include <video/jzpanel.h>
-///
 
 #include <asm/addrspace.h>
 #include <asm/page.h>
