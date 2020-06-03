@@ -390,13 +390,13 @@ static int jz4740_rtc_probe(struct platform_device *pdev)
 		// if (!pm_power_off) {
 			/* Default: 60ms */
 			rtc->reset_pin_assert_time = 60;
-			of_property_read_u32(&pdev->dev,
+			of_property_read_u32((const struct device_node*)&pdev->dev,
 					"reset-pin-assert-time",
 					&rtc->reset_pin_assert_time);
 
 			/* Default: 100ms */
 			rtc->min_wakeup_pin_assert_time = 1000;
-			of_property_read_u32(&pdev->dev,
+			of_property_read_u32((const struct device_node*)&pdev->dev,
 					"min-wakeup-pin-assert-time",
 					&rtc->min_wakeup_pin_assert_time);
 
