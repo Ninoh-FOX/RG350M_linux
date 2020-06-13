@@ -696,7 +696,7 @@ static void enable_jzsoc_gpu_clock(void)
 #ifdef CONFIG_MACH_JZ4770
     {
         /* JZ4770 GPU CLK2x 100MHz -- 500MHz */
-#define GPU_CLK_MAX 500000000
+#define GPU_CLK_MAX 518400000
         unsigned int GPUCDR_VAL=0;
         int div;
         int gpu_use_pll1 = 1;
