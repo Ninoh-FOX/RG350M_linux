@@ -398,12 +398,12 @@ static struct jz_mmc_platform_data gcw_external_sd_data = {
 
 static struct jz_battery_platform_data gcw0_battery_pdata = {
 	.gpio_charge = -1,
-	.gpio_charge_active_low = 1,
+	//.gpio_charge_active_low = 1,
 	.info = {
 		.name = "battery",
 		.technology = POWER_SUPPLY_TECHNOLOGY_LIPO,
 		.voltage_max_design = 4200000,
-		.voltage_min_design = 3300000,
+		.voltage_min_design = 3310000,
 	},
 };
 
