@@ -619,8 +619,8 @@ static struct platform_device gcw0_i2c4_gpio_device = {
 
 static struct platform_pwm_backlight_data gcw0_backlight_pdata = {
 	.polarity = PWM_POLARITY_NORMAL,
-	.max_brightness = 200,
-	.dft_brightness = 145,
+	.max_brightness = 255,
+	.dft_brightness = 150,
 	.pwm_period_ns = 30000, /* 25 kHz: outside human hearing range */
 };
 
@@ -649,12 +649,7 @@ struct jz_clk_board_data jz_clk_bdata = {
 	/* These two are fixed in hardware. */
 	.ext_rate	=   12000000,
 	.rtc_rate	=      32768,
-	/*
-	 * Pick 432 MHz as it is the least common multiple of 27 MHz (required
-	 * by TV encoder) and 48 MHz (required by USB host).
-	 */
-	/* 518,4 Mhz is the next multiple of 27Mhz and 48Mhz*/
-	.pll1_rate	=  518400000,
+	.pll1_rate	=  504000000,
 };
 
 /* Power LED */
