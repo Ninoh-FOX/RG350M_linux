@@ -45,6 +45,8 @@
 #define IPU_CTRL_DFIX_SEL	BIT(17)		/* fixed dest addr */
 #define IPU_CTRL_LCDC_SEL	BIT(11)		/* output to LCDC FIFO */
 #define IPU_CTRL_SPKG_SEL	BIT(10)		/* packed input format */
+#define IPU_CTRL_VSCALE		BIT(9)
+#define IPU_CTRL_HSCALE		BIT(8)
 #define IPU_CTRL_STOP		BIT(7)		/* stop conversion */
 #define IPU_CTRL_RST		BIT(6)		/* reset IPU */
 #define IPU_CTRL_FM_IRQ_EN	BIT(5)		/* Frame process finish IRQ */

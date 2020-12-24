@@ -17,8 +17,6 @@
  * published by the Free Software Foundation.
  */
 
-
-#define USE_VGA_HACK
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/spinlock.h>
@@ -76,20 +74,6 @@ struct jz_panel {
 	unsigned int bfw;	/* begin of frame, in line count */
 };
 
-#if defined(CONFIG_PANEL_NT39016)
-static const struct jz_panel jz4770_lcd_panel = {
-	.cfg = LCD_CFG_LCDPIN_LCD | LCD_CFG_RECOVER |	/* Underrun recover */
-		LCD_CFG_MODE_GENERIC_TFT |	/* General TFT panel */
-		LCD_CFG_MODE_TFT_24BIT |	/* output 24bpp */
-		/*LCD_CFG_PCP |*/	/* Pixel clock polarity: falling edge */
-		LCD_CFG_HSP |	/* Hsync polarity: active low */
-		LCD_CFG_VSP,	/* Vsync polarity: leading edge is falling edge */
-	/* bw, bh, dw, dh, fclk, hsw, vsw, elw, blw, efw, bfw */
-//	320, 240, 320, 240, 60, 50, 1, 10, 70, 5, 5,
-	320, 240, 320, 240, 60, 16, 6, 20, 60, 2, 8,
-	/* Note: 432000000 / 72 = 60 * 400 * 250, so we get exactly 60 Hz. */
-};
-#elif defined(CONFIG_PANEL_NV3052C)
 static const struct jz_panel jz4770_lcd_panel = {
 	.cfg = LCD_CFG_LCDPIN_LCD | LCD_CFG_RECOVER |	/* Underrun recover */
 		LCD_CFG_MODE_GENERIC_TFT |	/* General TFT panel */
@@ -102,7 +86,7 @@ static const struct jz_panel jz4770_lcd_panel = {
 	  640, 480, 640, 480, 60, 95, 2, 16, 144, 15, 5,
 	/* Note: 25200000 = 60 * 800 * 525, so we get exactly 60 Hz. */
 };
-#endif
+
 struct jzfb {
 	struct fb_info *fb;
 	struct platform_device *pdev;
@@ -135,7 +119,7 @@ struct jzfb {
 
 static void *lcd_frame1;
 
-static bool keep_aspect_ratio = true;
+static bool keep_aspect_ratio = false;
 static bool allow_downscaling = false;
 static bool integer_scaling = false;
 
@@ -250,14 +234,10 @@ static int reduce_fraction(unsigned int *num, unsigned int *denom)
 	unsigned long d = gcd(*num, *denom);
 
 	/* The scaling table has only 31 entries */
-#ifdef USE_VGA_HACK
-	if (*num > 40 * d)
-		return -EINVAL;
-
-#else
+	
 	if (*num > 31 * d)
 		return -EINVAL;
-#endif
+
 	*num /= d;
 	*denom /= d;
 	return 0;
@@ -633,6 +613,7 @@ static void jzfb_ipu_configure(struct jzfb *jzfb)
 		     outputH = panel->dh,
 		     xpos = 0, ypos = 0;
 
+	bool upscaling_w, upscaling_h;
 	/* Enable the chip, reset all the registers */
 	writel(IPU_CTRL_CHIP_EN | IPU_CTRL_RST, jzfb->ipu_base + IPU_CTRL);
 
@@ -711,28 +692,38 @@ static void jzfb_ipu_configure(struct jzfb *jzfb)
 		writel(IPU_CTRL_CHIP_EN | IPU_CTRL_ZOOM_SEL,
 			jzfb->ipu_base + IPU_CTRL);
 		ctrl |= IPU_CTRL_ZOOM_SEL;
+		
+		upscaling_w = 1;
+		if (upscaling_w)
+			ctrl |= IPU_CTRL_HSCALE;
+
+		upscaling_h = 1;
+		if (upscaling_h)
+			ctrl |= IPU_CTRL_VSCALE;
 
 		if (numW != 1 || denomW != 1) {
 			set_coefs(jzfb, IPU_HRSZ_COEF_LUT, numW, denomW);
-			coef_index |= ((numW - 1) << 16);
-			ctrl |= IPU_CTRL_HRSZ_EN;
+		if (!upscaling_w)
+			coef_index |= (denomW - 1) << 16;
+		else
+			coef_index |= (numW - 1) << 16;
+
+		ctrl |= IPU_CTRL_HRSZ_EN;
 		}
 
 		if (numH != 1 || denomH != 1) {
 			set_coefs(jzfb, IPU_VRSZ_COEF_LUT, numH, denomH);
-			coef_index |= numH - 1;
-			ctrl |= IPU_CTRL_VRSZ_EN;
-		}
+		if (!upscaling_h)
+			coef_index |= (denomH - 1);
+		else
+			coef_index |= (numH - 1);
 
+		ctrl |= IPU_CTRL_VRSZ_EN;
+		}
+		
 		outputH = fb->var.yres * numH / denomH;
 		outputW = fb->var.xres_virtual * numW / denomW;
-#ifdef USE_VGA_HACK
-if (fb->var.xres == 368)
-{
-printk("TONY's magic\n");
-outputW -= 64;
-}
-#endif
+
 		/*
 		 * If we are upscaling horizontally, the last columns of pixels
 		 * shall be hidden, as they usually contain garbage: the last
@@ -1378,8 +1369,8 @@ err_remove_allow_downscaling_file:
 	device_remove_file(&pdev->dev, &dev_attr_allow_downscaling.attr);
 err_remove_keep_aspect_ratio_file:
 	device_remove_file(&pdev->dev, &dev_attr_keep_aspect_ratio);
-err_exit_panel:
-	jzfb->pdata->panel_ops->exit(jzfb->panel_old);
+//err_exit_panel:
+//	jzfb->pdata->panel_ops->exit(jzfb->panel_old);
 err_unprepare_lpclk:
 	clk_disable_unprepare(jzfb->lpclk);
 err_unprepare_ipuclk:
@@ -1460,4 +1451,3 @@ module_platform_driver(jzfb_driver);
 MODULE_DESCRIPTION("Jz4770 LCD frame buffer driver");
 MODULE_AUTHOR("Maarten ter Huurne <maarten@treewalker.org>");
 MODULE_LICENSE("GPL");
-
