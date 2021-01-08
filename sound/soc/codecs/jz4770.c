@@ -324,7 +324,7 @@ static struct snd_soc_dai_driver jz_icdc_dai = {
 };
 
 /* unit: 0.01dB */
-static const DECLARE_TLV_DB_SCALE(dac_tlv, -3100, 100, PCM_MIXER_DAPM);
+static const DECLARE_TLV_DB_SCALE(dac_tlv, -3100, 100, 0);
 static const DECLARE_TLV_DB_SCALE(adc_tlv, 0, 100, 0);
 static const DECLARE_TLV_DB_SCALE(out_tlv, -2500, 100, 0);
 static const DECLARE_TLV_DB_SCALE(mic_boost_tlv, 0, 400, 0);
