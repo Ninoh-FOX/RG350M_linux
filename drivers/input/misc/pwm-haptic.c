@@ -45,8 +45,14 @@ static int pwm_haptic_play(struct input_dev *input, void *data,
 		      struct ff_effect *effect)
 {
 	struct pwm_haptic *haptic = input_get_drvdata(input);
-	unsigned int level = (2 * effect->u.rumble.strong_magnitude / 3) + (effect->u.rumble.weak_magnitude / 4);
+	unsigned int strong_level = effect->u.rumble.strong_magnitude;
+	unsigned int weak_level = effect->u.rumble.weak_magnitude;
+	unsigned int level;
 	u64 duty;
+
+	strong_level = (strong_level > 0) ? (2 * strong_level / 3) + (0x7FFF / 3) : 0x0;
+	weak_level = (weak_level > 0) ? (2 * weak_level / 3) + (0x7FFF / 3) : 0x0;
+	level = (2 * strong_level / 3) + (weak_level / 3);
 
 	dev_dbg(haptic->dev, "Configuring PWM for %u%%\n", (level * 100) >> 16);
 	duty = ((u64) haptic->pwm_period * level) >> 16;
