@@ -579,7 +579,7 @@ static struct platform_device gcw0_backlight_device = {
 /* Audio */
 
 static struct jz4770_icdc_platform_data gcw0_icdc_pdata = {
-	.mic_mode = JZ4770_MIC_1,
+//	.mic_mode = JZ4770_MIC_1,
 };
 
 static struct platform_device gcw0_audio_device = {
