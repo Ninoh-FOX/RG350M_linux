@@ -1070,11 +1070,12 @@ const struct cpumask *uv_flush_tlb_others(const struct cpumask *cpumask,
 	unsigned long status;
 
 	bcp = &per_cpu(bau_control, cpu);
-	stat = bcp->statp;
-	stat->s_enters++;
 
 	if (bcp->nobau)
 		return cpumask;
+
+	stat = bcp->statp;
+	stat->s_enters++;
 
 	if (bcp->busy) {
 		descriptor_status =
@@ -1366,6 +1367,10 @@ static int ptc_seq_show(struct seq_file *file, void *data)
 	}
 	if (cpu < num_possible_cpus() && cpu_online(cpu)) {
 		bcp = &per_cpu(bau_control, cpu);
+		if (bcp->nobau) {
+			seq_printf(file, "cpu %d bau disabled\n", cpu);
+			return 0;
+		}
 		stat = bcp->statp;
 		/* source side statistics */
 		seq_printf(file,

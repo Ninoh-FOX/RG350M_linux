@@ -171,7 +171,7 @@ static struct bpf_binary_header *bpf_alloc_binary(unsigned int proglen,
 	memset(header, 0xcc, sz); /* fill whole space with int3 instructions */
 
 	header->pages = sz / PAGE_SIZE;
-	hole = sz - (proglen + sizeof(*header));
+	hole = min(sz - (proglen + sizeof(*header)), PAGE_SIZE - sizeof(*header));
 
 	/* insert a random number of int3 instructions before BPF code */
 	*image_ptr = &header->image[prandom_u32() % hole];
@@ -211,7 +211,12 @@ void bpf_jit_compile(struct sk_filter *fp)
 	}
 	cleanup_addr = proglen; /* epilogue address */
 
-	for (pass = 0; pass < 10; pass++) {
+	/* JITed image shrinks with every pass and the loop iterates
+	 * until the image stops shrinking. Very large bpf programs
+	 * may converge on the last pass. In such case do one more
+	 * pass to emit the final image
+	 */
+	for (pass = 0; pass < 10 || image; pass++) {
 		u8 seen_or_pass0 = (pass == 0) ? (SEEN_XREG | SEEN_DATAREF | SEEN_MEM) : seen;
 		/* no prologue/epilogue for trivial filters (RET something) */
 		proglen = 0;
@@ -359,15 +364,21 @@ void bpf_jit_compile(struct sk_filter *fp)
 				EMIT2(0x89, 0xd0);	/* mov %edx,%eax */
 				break;
 			case BPF_S_ALU_MOD_K: /* A %= K; */
+				if (K == 1) {
+					CLEAR_A();
+					break;
+				}
 				EMIT2(0x31, 0xd2);	/* xor %edx,%edx */
 				EMIT1(0xb9);EMIT(K, 4);	/* mov imm32,%ecx */
 				EMIT2(0xf7, 0xf1);	/* div %ecx */
 				EMIT2(0x89, 0xd0);	/* mov %edx,%eax */
 				break;
-			case BPF_S_ALU_DIV_K: /* A = reciprocal_divide(A, K); */
-				EMIT3(0x48, 0x69, 0xc0); /* imul imm32,%rax,%rax */
-				EMIT(K, 4);
-				EMIT4(0x48, 0xc1, 0xe8, 0x20); /* shr $0x20,%rax */
+			case BPF_S_ALU_DIV_K: /* A /= K */
+				if (K == 1)
+					break;
+				EMIT2(0x31, 0xd2);	/* xor %edx,%edx */
+				EMIT1(0xb9);EMIT(K, 4);	/* mov imm32,%ecx */
+				EMIT2(0xf7, 0xf1);	/* div %ecx */
 				break;
 			case BPF_S_ALU_AND_X:
 				seen |= SEEN_XREG;
@@ -788,5 +799,7 @@ void bpf_jit_free(struct sk_filter *fp)
 	if (fp->bpf_func != sk_run_filter) {
 		INIT_WORK(&fp->work, bpf_jit_free_deferred);
 		schedule_work(&fp->work);
+	} else {
+		kfree(fp);
 	}
 }

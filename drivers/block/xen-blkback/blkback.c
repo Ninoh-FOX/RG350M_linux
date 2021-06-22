@@ -755,6 +755,7 @@ again:
 			BUG_ON(new_map_idx >= segs_to_map);
 			if (unlikely(map[new_map_idx].status != 0)) {
 				pr_debug(DRV_PFX "invalid buffer -- could not remap it\n");
+				put_free_pages(blkif, &pages[seg_idx]->page, 1);
 				pages[seg_idx]->handle = BLKBACK_INVALID_HANDLE;
 				ret |= 1;
 				goto next;
@@ -852,6 +853,8 @@ static int xen_blkbk_parse_indirect(struct blkif_request *req,
 		goto unmap;
 
 	for (n = 0, i = 0; n < nseg; n++) {
+		uint8_t first_sect, last_sect;
+
 		if ((n % SEGS_PER_INDIRECT_FRAME) == 0) {
 			/* Map indirect segments */
 			if (segments)
@@ -859,15 +862,18 @@ static int xen_blkbk_parse_indirect(struct blkif_request *req,
 			segments = kmap_atomic(pages[n/SEGS_PER_INDIRECT_FRAME]->page);
 		}
 		i = n % SEGS_PER_INDIRECT_FRAME;
+
 		pending_req->segments[n]->gref = segments[i].gref;
-		seg[n].nsec = segments[i].last_sect -
-			segments[i].first_sect + 1;
-		seg[n].offset = (segments[i].first_sect << 9);
-		if ((segments[i].last_sect >= (PAGE_SIZE >> 9)) ||
-		    (segments[i].last_sect < segments[i].first_sect)) {
+
+		first_sect = READ_ONCE(segments[i].first_sect);
+		last_sect = READ_ONCE(segments[i].last_sect);
+		if (last_sect >= (PAGE_SIZE >> 9) || last_sect < first_sect) {
 			rc = -EINVAL;
 			goto unmap;
 		}
+
+		seg[n].nsec = last_sect - first_sect + 1;
+		seg[n].offset = first_sect << 9;
 		preq->nr_sects += seg[n].nsec;
 	}
 
@@ -887,6 +893,8 @@ static int dispatch_discard_io(struct xen_blkif *blkif,
 	unsigned long secure;
 	struct phys_req preq;
 
+	xen_blkif_get(blkif);
+
 	preq.sector_number = req->u.discard.sector_number;
 	preq.nr_sects      = req->u.discard.nr_sectors;
 
@@ -899,7 +907,6 @@ static int dispatch_discard_io(struct xen_blkif *blkif,
 	}
 	blkif->st_ds_req++;
 
-	xen_blkif_get(blkif);
 	secure = (blkif->vbd.discard_secure &&
 		 (req->u.discard.flag & BLKIF_DISCARD_SECURE)) ?
 		 BLKDEV_DISCARD_SECURE : 0;

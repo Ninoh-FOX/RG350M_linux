@@ -617,6 +617,7 @@ void core_dev_unexport(
 	dev->export_count--;
 	spin_unlock(&hba->device_lock);
 
+	lun->lun_sep = NULL;
 	lun->lun_se_dev = NULL;
 }
 
@@ -799,10 +800,10 @@ int se_dev_set_emulate_write_cache(struct se_device *dev, int flag)
 		pr_err("emulate_write_cache not supported for pSCSI\n");
 		return -EINVAL;
 	}
-	if (dev->transport->get_write_cache) {
-		pr_warn("emulate_write_cache cannot be changed when underlying"
-			" HW reports WriteCacheEnabled, ignoring request\n");
-		return 0;
+	if (flag &&
+	    dev->transport->get_write_cache) {
+		pr_err("emulate_write_cache not supported for this device\n");
+		return -EINVAL;
 	}
 
 	dev->dev_attrib.emulate_write_cache = flag;
@@ -1065,10 +1066,10 @@ int se_dev_set_optimal_sectors(struct se_device *dev, u32 optimal_sectors)
 				" changed for TCM/pSCSI\n", dev);
 		return -EINVAL;
 	}
-	if (optimal_sectors > dev->dev_attrib.fabric_max_sectors) {
+	if (optimal_sectors > dev->dev_attrib.hw_max_sectors) {
 		pr_err("dev[%p]: Passed optimal_sectors %u cannot be"
-			" greater than fabric_max_sectors: %u\n", dev,
-			optimal_sectors, dev->dev_attrib.fabric_max_sectors);
+			" greater than hw_max_sectors: %u\n", dev,
+			optimal_sectors, dev->dev_attrib.hw_max_sectors);
 		return -EINVAL;
 	}
 
@@ -1107,6 +1108,11 @@ int se_dev_set_block_size(struct se_device *dev, u32 block_size)
 	dev->dev_attrib.block_size = block_size;
 	pr_debug("dev[%p]: SE Device block_size changed to %u\n",
 			dev, block_size);
+
+	if (dev->dev_attrib.max_bytes_per_io)
+		dev->dev_attrib.hw_max_sectors =
+			dev->dev_attrib.max_bytes_per_io / block_size;
+
 	return 0;
 }
 
@@ -1316,7 +1322,8 @@ int core_dev_add_initiator_node_lun_acl(
 	 * Check to see if there are any existing persistent reservation APTPL
 	 * pre-registrations that need to be enabled for this LUN ACL..
 	 */
-	core_scsi3_check_aptpl_registration(lun->lun_se_dev, tpg, lun, lacl);
+	core_scsi3_check_aptpl_registration(lun->lun_se_dev, tpg, lun, nacl,
+					    lacl->mapped_lun);
 	return 0;
 }
 
@@ -1467,7 +1474,6 @@ struct se_device *target_alloc_device(struct se_hba *hba, const char *name)
 				DA_UNMAP_GRANULARITY_ALIGNMENT_DEFAULT;
 	dev->dev_attrib.max_write_same_len = DA_MAX_WRITE_SAME_LEN;
 	dev->dev_attrib.fabric_max_sectors = DA_FABRIC_MAX_SECTORS;
-	dev->dev_attrib.optimal_sectors = DA_FABRIC_MAX_SECTORS;
 
 	return dev;
 }
@@ -1486,8 +1492,6 @@ int target_configure_device(struct se_device *dev)
 	ret = dev->transport->configure_device(dev);
 	if (ret)
 		goto out;
-	dev->dev_flags |= DF_CONFIGURED;
-
 	/*
 	 * XXX: there is not much point to have two different values here..
 	 */
@@ -1500,6 +1504,7 @@ int target_configure_device(struct se_device *dev)
 	dev->dev_attrib.hw_max_sectors =
 		se_dev_align_max_sectors(dev->dev_attrib.hw_max_sectors,
 					 dev->dev_attrib.hw_block_size);
+	dev->dev_attrib.optimal_sectors = dev->dev_attrib.hw_max_sectors;
 
 	dev->dev_index = scsi_get_new_index(SCSI_DEVICE_INDEX);
 	dev->creation_time = get_jiffies_64();
@@ -1547,6 +1552,8 @@ int target_configure_device(struct se_device *dev)
 	mutex_lock(&g_device_mutex);
 	list_add_tail(&dev->g_dev_node, &g_device_list);
 	mutex_unlock(&g_device_mutex);
+
+	dev->dev_flags |= DF_CONFIGURED;
 
 	return 0;
 

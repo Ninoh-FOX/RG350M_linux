@@ -101,7 +101,11 @@ void reiserfs_schedule_old_flush(struct super_block *s)
 	struct reiserfs_sb_info *sbi = REISERFS_SB(s);
 	unsigned long delay;
 
-	if (s->s_flags & MS_RDONLY)
+	/*
+	 * Avoid scheduling flush when sb is being shut down. It can race
+	 * with journal shutdown and free still queued delayed work.
+	 */
+	if (s->s_flags & MS_RDONLY || !(s->s_flags & MS_ACTIVE))
 		return;
 
 	spin_lock(&sbi->old_work_lock);
@@ -184,7 +188,15 @@ static int remove_save_link_only(struct super_block *s,
 static int reiserfs_quota_on_mount(struct super_block *, int);
 #endif
 
-/* look for uncompleted unlinks and truncates and complete them */
+/*
+ * Look for uncompleted unlinks and truncates and complete them
+ *
+ * Called with superblock write locked.  If quotas are enabled, we have to
+ * release/retake lest we call dquot_quota_on_mount(), proceed to
+ * schedule_on_each_cpu() in invalidate_bdev() and deadlock waiting for the per
+ * cpu worklets to complete flush_async_commits() that in turn wait for the
+ * superblock write lock.
+ */
 static int finish_unfinished(struct super_block *s)
 {
 	INITIALIZE_PATH(path);
@@ -231,7 +243,9 @@ static int finish_unfinished(struct super_block *s)
 				quota_enabled[i] = 0;
 				continue;
 			}
+			reiserfs_write_unlock(s);
 			ret = reiserfs_quota_on_mount(s, i);
+			reiserfs_write_lock(s);
 			if (ret < 0)
 				reiserfs_warning(s, "reiserfs-2500",
 						 "cannot turn on journaled "

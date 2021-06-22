@@ -87,10 +87,6 @@ extern mempool_t *cifs_mid_poolp;
 
 struct workqueue_struct	*cifsiod_wq;
 
-#ifdef CONFIG_CIFS_SMB2
-__u8 cifs_client_guid[SMB2_CLIENT_GUID_SIZE];
-#endif
-
 /*
  * Bumps refcount for cifs super block.
  * Note that it should be only called if a referece to VFS super block is
@@ -253,13 +249,18 @@ cifs_alloc_inode(struct super_block *sb)
 	cifs_set_oplock_level(cifs_inode, 0);
 	cifs_inode->delete_pending = false;
 	cifs_inode->invalid_mapping = false;
+	clear_bit(CIFS_INODE_PENDING_OPLOCK_BREAK, &cifs_inode->flags);
+	clear_bit(CIFS_INODE_PENDING_WRITERS, &cifs_inode->flags);
+	clear_bit(CIFS_INODE_DOWNGRADE_OPLOCK_TO_L2, &cifs_inode->flags);
+	spin_lock_init(&cifs_inode->writers_lock);
+	cifs_inode->writers = 0;
 	cifs_inode->vfs_inode.i_blkbits = 14;  /* 2**14 = CIFS_MAX_MSGSIZE */
 	cifs_inode->server_eof = 0;
 	cifs_inode->uniqueid = 0;
 	cifs_inode->createtime = 0;
 	cifs_inode->epoch = 0;
 #ifdef CONFIG_CIFS_SMB2
-	get_random_bytes(cifs_inode->lease_key, SMB2_LEASE_KEY_SIZE);
+	generate_random_uuid(cifs_inode->lease_key);
 #endif
 	/*
 	 * Can not set i_flags here - they get immediately overwritten to zero
@@ -585,6 +586,9 @@ cifs_get_root(struct smb_vol *vol, struct super_block *sb)
 	char *s, *p;
 	char sep;
 
+	if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_USE_PREFIX_PATH)
+		return dget(sb->s_root);
+
 	full_path = cifs_build_path_to_root(vol, cifs_sb,
 					    cifs_sb_master_tcon(cifs_sb));
 	if (full_path == NULL)
@@ -664,10 +668,14 @@ cifs_do_mount(struct file_system_type *fs_type,
 	cifs_sb->mountdata = kstrndup(data, PAGE_SIZE, GFP_KERNEL);
 	if (cifs_sb->mountdata == NULL) {
 		root = ERR_PTR(-ENOMEM);
-		goto out_cifs_sb;
+		goto out_free;
 	}
 
-	cifs_setup_cifs_sb(volume_info, cifs_sb);
+	rc = cifs_setup_cifs_sb(volume_info, cifs_sb);
+	if (rc) {
+		root = ERR_PTR(rc);
+		goto out_free;
+	}
 
 	rc = cifs_mount(cifs_sb, volume_info);
 	if (rc) {
@@ -675,7 +683,7 @@ cifs_do_mount(struct file_system_type *fs_type,
 			cifs_dbg(VFS, "cifs_mount failed w/return code = %d\n",
 				 rc);
 		root = ERR_PTR(rc);
-		goto out_mountdata;
+		goto out_free;
 	}
 
 	mnt_data.vol = volume_info;
@@ -718,9 +726,9 @@ out:
 	cifs_cleanup_volume_info(volume_info);
 	return root;
 
-out_mountdata:
+out_free:
+	kfree(cifs_sb->prepath);
 	kfree(cifs_sb->mountdata);
-out_cifs_sb:
 	kfree(cifs_sb);
 out_nls:
 	unload_nls(volume_info->local_nls);
@@ -731,19 +739,26 @@ static ssize_t cifs_file_aio_write(struct kiocb *iocb, const struct iovec *iov,
 				   unsigned long nr_segs, loff_t pos)
 {
 	struct inode *inode = file_inode(iocb->ki_filp);
+	struct cifsInodeInfo *cinode = CIFS_I(inode);
 	ssize_t written;
 	int rc;
+
+	written = cifs_get_writer(cinode);
+	if (written)
+		return written;
 
 	written = generic_file_aio_write(iocb, iov, nr_segs, pos);
 
 	if (CIFS_CACHE_WRITE(CIFS_I(inode)))
-		return written;
+		goto out;
 
 	rc = filemap_fdatawrite(inode->i_mapping);
 	if (rc)
 		cifs_dbg(FYI, "cifs_file_aio_write: %d rc on %p inode\n",
 			 rc, inode);
 
+out:
+	cifs_put_writer(cinode);
 	return written;
 }
 
@@ -1177,12 +1192,7 @@ init_cifs(void)
 	GlobalTotalActiveXid = 0;
 	GlobalMaxActiveXid = 0;
 	spin_lock_init(&cifs_tcp_ses_lock);
-	spin_lock_init(&cifs_file_list_lock);
 	spin_lock_init(&GlobalMid_Lock);
-
-#ifdef CONFIG_CIFS_SMB2
-	get_random_bytes(cifs_client_guid, SMB2_CLIENT_GUID_SIZE);
-#endif
 
 	if (cifs_max_pending < 2) {
 		cifs_max_pending = 2;

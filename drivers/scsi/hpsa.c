@@ -105,7 +105,6 @@ static const struct pci_device_id hpsa_pci_device_id[] = {
 	{PCI_VENDOR_ID_HP,     PCI_DEVICE_ID_HP_CISSH,     0x103C, 0x1922},
 	{PCI_VENDOR_ID_HP,     PCI_DEVICE_ID_HP_CISSH,     0x103C, 0x1923},
 	{PCI_VENDOR_ID_HP,     PCI_DEVICE_ID_HP_CISSH,     0x103C, 0x1924},
-	{PCI_VENDOR_ID_HP,     PCI_DEVICE_ID_HP_CISSH,     0x103C, 0x1925},
 	{PCI_VENDOR_ID_HP,     PCI_DEVICE_ID_HP_CISSH,     0x103C, 0x1926},
 	{PCI_VENDOR_ID_HP,     PCI_DEVICE_ID_HP_CISSH,     0x103C, 0x1928},
 	{PCI_VENDOR_ID_HP,     PCI_DEVICE_ID_HP_CISSH,     0x103C, 0x1929},
@@ -140,6 +139,7 @@ static struct board_type products[] = {
 	{0x3249103C, "Smart Array P812", &SA5_access},
 	{0x324A103C, "Smart Array P712m", &SA5_access},
 	{0x324B103C, "Smart Array P711m", &SA5_access},
+	{0x3233103C, "HP StorageWorks 1210m", &SA5_access}, /* alias of 333f */
 	{0x3350103C, "Smart Array P222", &SA5_access},
 	{0x3351103C, "Smart Array P420", &SA5_access},
 	{0x3352103C, "Smart Array P421", &SA5_access},
@@ -562,6 +562,7 @@ static struct scsi_host_template hpsa_driver_template = {
 	.sdev_attrs = hpsa_sdev_attrs,
 	.shost_attrs = hpsa_shost_attrs,
 	.max_sectors = 8192,
+	.no_write_same = 1,
 };
 
 
@@ -1289,7 +1290,7 @@ static void complete_scsi_command(struct CommandList *cp)
 					"has check condition: aborted command: "
 					"ASC: 0x%x, ASCQ: 0x%x\n",
 					cp, asc, ascq);
-				cmd->result = DID_SOFT_ERROR << 16;
+				cmd->result |= DID_SOFT_ERROR << 16;
 				break;
 			}
 			/* Must be some other type of check condition */
@@ -3139,7 +3140,7 @@ static int hpsa_big_passthru_ioctl(struct ctlr_info *h, void __user *argp)
 		}
 		if (ioc->Request.Type.Direction == XFER_WRITE) {
 			if (copy_from_user(buff[sg_used], data_ptr, sz)) {
-				status = -ENOMEM;
+				status = -EFAULT;
 				goto cleanup1;
 			}
 		} else
@@ -3919,10 +3920,6 @@ static int hpsa_kdump_hard_reset_controller(struct pci_dev *pdev)
 
 	/* Save the PCI command register */
 	pci_read_config_word(pdev, 4, &command_register);
-	/* Turn the board off.  This is so that later pci_restore_state()
-	 * won't turn the board on before the rest of config space is ready.
-	 */
-	pci_disable_device(pdev);
 	pci_save_state(pdev);
 
 	/* find the first memory BAR, so we can find the cfg table */
@@ -3970,11 +3967,6 @@ static int hpsa_kdump_hard_reset_controller(struct pci_dev *pdev)
 		goto unmap_cfgtable;
 
 	pci_restore_state(pdev);
-	rc = pci_enable_device(pdev);
-	if (rc) {
-		dev_warn(&pdev->dev, "failed to enable device.\n");
-		goto unmap_cfgtable;
-	}
 	pci_write_config_word(pdev, 4, command_register);
 
 	/* Some devices (notably the HP Smart Array 5i Controller)
@@ -4465,9 +4457,36 @@ static void hpsa_hba_inquiry(struct ctlr_info *h)
 static int hpsa_init_reset_devices(struct pci_dev *pdev)
 {
 	int rc, i;
+	void __iomem *vaddr;
 
 	if (!reset_devices)
 		return 0;
+
+	/* kdump kernel is loading, we don't know in which state is
+	 * the pci interface. The dev->enable_cnt is equal zero
+	 * so we call enable+disable, wait a while and switch it on.
+	 */
+	rc = pci_enable_device(pdev);
+	if (rc) {
+		dev_warn(&pdev->dev, "Failed to enable PCI device\n");
+		return -ENODEV;
+	}
+	pci_disable_device(pdev);
+	msleep(260);			/* a randomly chosen number */
+	rc = pci_enable_device(pdev);
+	if (rc) {
+		dev_warn(&pdev->dev, "failed to enable device.\n");
+		return -ENODEV;
+	}
+	pci_set_master(pdev);
+
+	vaddr = pci_ioremap_bar(pdev, 0);
+	if (vaddr == NULL) {
+		rc = -ENOMEM;
+		goto out_disable;
+	}
+	writel(SA5_INTR_OFF, vaddr + SA5_REPLY_INTR_MASK_OFFSET);
+	iounmap(vaddr);
 
 	/* Reset the controller with a PCI power-cycle or via doorbell */
 	rc = hpsa_kdump_hard_reset_controller(pdev);
@@ -4477,10 +4496,11 @@ static int hpsa_init_reset_devices(struct pci_dev *pdev)
 	 * "performant mode".  Or, it might be 640x, which can't reset
 	 * due to concerns about shared bbwc between 6402/6404 pair.
 	 */
-	if (rc == -ENOTSUPP)
-		return rc; /* just try to do the kdump anyhow. */
-	if (rc)
-		return -ENODEV;
+	if (rc) {
+		if (rc != -ENOTSUPP) /* just try to do the kdump anyhow. */
+			rc = -ENODEV;
+		goto out_disable;
+	}
 
 	/* Now try to get the controller to respond to a no-op */
 	dev_warn(&pdev->dev, "Waiting for controller to respond to no-op\n");
@@ -4491,7 +4511,11 @@ static int hpsa_init_reset_devices(struct pci_dev *pdev)
 			dev_warn(&pdev->dev, "no-op failed%s\n",
 					(i < 11 ? "; re-trying" : ""));
 	}
-	return 0;
+
+out_disable:
+
+	pci_disable_device(pdev);
+	return rc;
 }
 
 static int hpsa_allocate_cmd_pool(struct ctlr_info *h)
@@ -4634,6 +4658,7 @@ static void hpsa_undo_allocations_after_kdump_soft_reset(struct ctlr_info *h)
 		iounmap(h->transtable);
 	if (h->cfgtable)
 		iounmap(h->cfgtable);
+	pci_disable_device(h->pdev);
 	pci_release_regions(h->pdev);
 	kfree(h);
 }
@@ -4926,7 +4951,7 @@ reinit_after_soft_reset:
 	hpsa_hba_inquiry(h);
 	hpsa_register_scsi(h);	/* hook ourselves into SCSI subsystem */
 	start_controller_lockup_detector(h);
-	return 1;
+	return 0;
 
 clean4:
 	hpsa_free_sg_chain_blocks(h);

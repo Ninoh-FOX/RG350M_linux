@@ -47,6 +47,10 @@ struct cs_spec {
 	unsigned int spdif_present:1;
 	unsigned int sense_b:1;
 	hda_nid_t vendor_nid;
+
+	/* for MBP SPDIF control */
+	int (*spdif_sw_put)(struct snd_kcontrol *kcontrol,
+			    struct snd_ctl_elem_value *ucontrol);
 };
 
 /* available models with CS420x */
@@ -173,8 +177,12 @@ static void cs_automute(struct hda_codec *codec)
 	snd_hda_gen_update_outputs(codec);
 
 	if (spec->gpio_eapd_hp || spec->gpio_eapd_speaker) {
-		spec->gpio_data = spec->gen.hp_jack_present ?
-			spec->gpio_eapd_hp : spec->gpio_eapd_speaker;
+		if (spec->gen.automute_speaker)
+			spec->gpio_data = spec->gen.hp_jack_present ?
+				spec->gpio_eapd_hp : spec->gpio_eapd_speaker;
+		else
+			spec->gpio_data =
+				spec->gpio_eapd_hp | spec->gpio_eapd_speaker;
 		snd_hda_codec_write(codec, 0x01, 0,
 				    AC_VERB_SET_GPIO_DATA, spec->gpio_data);
 	}
@@ -331,10 +339,21 @@ static int cs_init(struct hda_codec *codec)
 	return 0;
 }
 
+static int cs_build_controls(struct hda_codec *codec)
+{
+	int err;
+
+	err = snd_hda_gen_build_controls(codec);
+	if (err < 0)
+		return err;
+	snd_hda_apply_fixup(codec, HDA_FIXUP_ACT_BUILD);
+	return 0;
+}
+
 #define cs_free		snd_hda_gen_free
 
 static const struct hda_codec_ops cs_patch_ops = {
-	.build_controls = snd_hda_gen_build_controls,
+	.build_controls = cs_build_controls,
 	.build_pcms = snd_hda_gen_build_pcms,
 	.init = cs_init,
 	.free = cs_free,
@@ -381,6 +400,7 @@ static const struct snd_pci_quirk cs420x_fixup_tbl[] = {
 	SND_PCI_QUIRK(0x106b, 0x1c00, "MacBookPro 8,1", CS420X_MBP81),
 	SND_PCI_QUIRK(0x106b, 0x2000, "iMac 12,2", CS420X_IMAC27_122),
 	SND_PCI_QUIRK(0x106b, 0x2800, "MacBookPro 10,1", CS420X_MBP101),
+	SND_PCI_QUIRK(0x106b, 0x5600, "MacBookAir 5,2", CS420X_MBP81),
 	SND_PCI_QUIRK(0x106b, 0x5b00, "MacBookAir 4,2", CS420X_MBA42),
 	SND_PCI_QUIRK_VENDOR(0x106b, "Apple", CS420X_APPLE),
 	{} /* terminator */
@@ -572,6 +592,7 @@ static int patch_cs420x(struct hda_codec *codec)
 		return -ENOMEM;
 
 	spec->gen.automute_hook = cs_automute;
+	codec->single_adc_amp = 1;
 
 	snd_hda_pick_fixup(codec, cs420x_models, cs420x_fixup_tbl,
 			   cs420x_fixups);
@@ -597,20 +618,33 @@ static int patch_cs420x(struct hda_codec *codec)
  * Its layout is no longer compatible with CS4206/CS4207
  */
 enum {
+	CS4208_MAC_AUTO,
 	CS4208_MBA6,
+	CS4208_MBP11,
+	CS4208_MACMINI,
 	CS4208_GPIO0,
 };
 
 static const struct hda_model_fixup cs4208_models[] = {
 	{ .id = CS4208_GPIO0, .name = "gpio0" },
 	{ .id = CS4208_MBA6, .name = "mba6" },
+	{ .id = CS4208_MBP11, .name = "mbp11" },
+	{ .id = CS4208_MACMINI, .name = "macmini" },
 	{}
 };
 
 static const struct snd_pci_quirk cs4208_fixup_tbl[] = {
-	/* codec SSID */
+	SND_PCI_QUIRK_VENDOR(0x106b, "Apple", CS4208_MAC_AUTO),
+	{} /* terminator */
+};
+
+/* codec SSID matching */
+static const struct snd_pci_quirk cs4208_mac_fixup_tbl[] = {
+	SND_PCI_QUIRK(0x106b, 0x5e00, "MacBookPro 11,2", CS4208_MBP11),
+	SND_PCI_QUIRK(0x106b, 0x6c00, "MacMini 7,1", CS4208_MACMINI),
 	SND_PCI_QUIRK(0x106b, 0x7100, "MacBookAir 6,1", CS4208_MBA6),
 	SND_PCI_QUIRK(0x106b, 0x7200, "MacBookAir 6,2", CS4208_MBA6),
+	SND_PCI_QUIRK(0x106b, 0x7b00, "MacBookPro 12,1", CS4208_MBP11),
 	{} /* terminator */
 };
 
@@ -626,6 +660,68 @@ static void cs4208_fixup_gpio0(struct hda_codec *codec,
 	}
 }
 
+static const struct hda_fixup cs4208_fixups[];
+
+/* remap the fixup from codec SSID and apply it */
+static void cs4208_fixup_mac(struct hda_codec *codec,
+			     const struct hda_fixup *fix, int action)
+{
+	if (action != HDA_FIXUP_ACT_PRE_PROBE)
+		return;
+	snd_hda_pick_fixup(codec, NULL, cs4208_mac_fixup_tbl, cs4208_fixups);
+	if (codec->fixup_id < 0 || codec->fixup_id == CS4208_MAC_AUTO)
+		codec->fixup_id = CS4208_GPIO0; /* default fixup */
+	snd_hda_apply_fixup(codec, action);
+}
+
+/* MacMini 7,1 has the inverted jack detection */
+static void cs4208_fixup_macmini(struct hda_codec *codec,
+				 const struct hda_fixup *fix, int action)
+{
+	static const struct hda_pintbl pincfgs[] = {
+		{ 0x18, 0x00ab9150 }, /* mic (audio-in) jack: disable detect */
+		{ 0x21, 0x004be140 }, /* SPDIF: disable detect */
+		{ }
+	};
+
+	if (action == HDA_FIXUP_ACT_PRE_PROBE) {
+		/* HP pin (0x10) has an inverted detection */
+		codec->inv_jack_detect = 1;
+		/* disable the bogus Mic and SPDIF jack detections */
+		snd_hda_apply_pincfgs(codec, pincfgs);
+	}
+}
+
+static int cs4208_spdif_sw_put(struct snd_kcontrol *kcontrol,
+			       struct snd_ctl_elem_value *ucontrol)
+{
+	struct hda_codec *codec = snd_kcontrol_chip(kcontrol);
+	struct cs_spec *spec = codec->spec;
+	hda_nid_t pin = spec->gen.autocfg.dig_out_pins[0];
+	int pinctl = ucontrol->value.integer.value[0] ? PIN_OUT : 0;
+
+	snd_hda_set_pin_ctl_cache(codec, pin, pinctl);
+	return spec->spdif_sw_put(kcontrol, ucontrol);
+}
+
+/* hook the SPDIF switch */
+static void cs4208_fixup_spdif_switch(struct hda_codec *codec,
+				      const struct hda_fixup *fix, int action)
+{
+	if (action == HDA_FIXUP_ACT_BUILD) {
+		struct cs_spec *spec = codec->spec;
+		struct snd_kcontrol *kctl;
+
+		if (!spec->gen.autocfg.dig_out_pins[0])
+			return;
+		kctl = snd_hda_find_mixer_ctl(codec, "IEC958 Playback Switch");
+		if (!kctl)
+			return;
+		spec->spdif_sw_put = kctl->put;
+		kctl->put = cs4208_spdif_sw_put;
+	}
+}
+
 static const struct hda_fixup cs4208_fixups[] = {
 	[CS4208_MBA6] = {
 		.type = HDA_FIXUP_PINS,
@@ -633,9 +729,25 @@ static const struct hda_fixup cs4208_fixups[] = {
 		.chained = true,
 		.chain_id = CS4208_GPIO0,
 	},
+	[CS4208_MBP11] = {
+		.type = HDA_FIXUP_FUNC,
+		.v.func = cs4208_fixup_spdif_switch,
+		.chained = true,
+		.chain_id = CS4208_GPIO0,
+	},
+	[CS4208_MACMINI] = {
+		.type = HDA_FIXUP_FUNC,
+		.v.func = cs4208_fixup_macmini,
+		.chained = true,
+		.chain_id = CS4208_GPIO0,
+	},
 	[CS4208_GPIO0] = {
 		.type = HDA_FIXUP_FUNC,
 		.v.func = cs4208_fixup_gpio0,
+	},
+	[CS4208_MAC_AUTO] = {
+		.type = HDA_FIXUP_FUNC,
+		.v.func = cs4208_fixup_mac,
 	},
 };
 
@@ -660,6 +772,8 @@ static int patch_cs4208(struct hda_codec *codec)
 		return -ENOMEM;
 
 	spec->gen.automute_hook = cs_automute;
+	/* exclude NID 0x10 (HP) from output volumes due to different steps */
+	spec->gen.out_vol_mask = 1ULL << 0x10;
 
 	snd_hda_pick_fixup(codec, cs4208_models, cs4208_fixup_tbl,
 			   cs4208_fixups);
@@ -920,9 +1034,7 @@ static void cs4210_spdif_automute(struct hda_codec *codec,
 
 	spec->spdif_present = spdif_present;
 	/* SPDIF TX on/off */
-	if (spdif_present)
-		snd_hda_set_pin_ctl(codec, spdif_pin,
-				    spdif_present ? PIN_OUT : 0);
+	snd_hda_set_pin_ctl(codec, spdif_pin, spdif_present ? PIN_OUT : 0);
 
 	cs_automute(codec);
 }

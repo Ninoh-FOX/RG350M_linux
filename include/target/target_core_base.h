@@ -378,7 +378,7 @@ struct t10_reservation {
 	/* Activate Persistence across Target Power Loss enabled
 	 * for SCSI device */
 	int pr_aptpl_active;
-#define PR_APTPL_BUF_LEN			8192
+#define PR_APTPL_BUF_LEN			262144
 	u32 pr_generation;
 	spinlock_t registration_lock;
 	spinlock_t aptpl_reg_lock;
@@ -457,7 +457,7 @@ struct se_cmd {
 	sense_reason_t		(*execute_cmd)(struct se_cmd *);
 	sense_reason_t		(*execute_rw)(struct se_cmd *, struct scatterlist *,
 					      u32, enum dma_data_direction);
-	sense_reason_t (*transport_complete_callback)(struct se_cmd *);
+	sense_reason_t (*transport_complete_callback)(struct se_cmd *, bool, int *);
 
 	unsigned char		*t_task_cdb;
 	unsigned char		__t_task_cdb[TCM_MAX_COMMAND_SIZE];
@@ -624,6 +624,7 @@ struct se_dev_attrib {
 	u32		unmap_granularity;
 	u32		unmap_granularity_alignment;
 	u32		max_write_same_len;
+	u32		max_bytes_per_io;
 	struct se_device *da_dev;
 	struct config_group da_group;
 };

@@ -180,8 +180,6 @@ alarm_timer_callback(struct nouveau_alarm *alarm)
 
 	spin_lock_irqsave(&priv->sensor.alarm_program_lock, flags);
 
-	nv_debug(therm, "polling the internal temperature\n");
-
 	nouveau_therm_threshold_hyst_polling(therm, &sensor->thrs_fan_boost,
 					     NOUVEAU_THERM_THRS_FANBOOST);
 
@@ -194,11 +192,11 @@ alarm_timer_callback(struct nouveau_alarm *alarm)
 	nouveau_therm_threshold_hyst_polling(therm, &sensor->thrs_shutdown,
 					     NOUVEAU_THERM_THRS_SHUTDOWN);
 
+	spin_unlock_irqrestore(&priv->sensor.alarm_program_lock, flags);
+
 	/* schedule the next poll in one second */
 	if (therm->temp_get(therm) >= 0 && list_empty(&alarm->head))
-		ptimer->alarm(ptimer, 1000 * 1000 * 1000, alarm);
-
-	spin_unlock_irqrestore(&priv->sensor.alarm_program_lock, flags);
+		ptimer->alarm(ptimer, 1000000000ULL, alarm);
 }
 
 void

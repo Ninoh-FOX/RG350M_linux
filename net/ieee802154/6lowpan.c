@@ -548,7 +548,7 @@ static int lowpan_header_create(struct sk_buff *skb,
 			hc06_ptr += 3;
 		} else {
 			/* compress nothing */
-			memcpy(hc06_ptr, &hdr, 4);
+			memcpy(hc06_ptr, hdr, 4);
 			/* replace the top byte with new ECN | DSCP format */
 			*hc06_ptr = tmp;
 			hc06_ptr += 4;
@@ -957,7 +957,7 @@ lowpan_process_data(struct sk_buff *skb)
 	 * Traffic class carried in-line
 	 * ECN + DSCP (1 byte), Flow Label is elided
 	 */
-	case 1: /* 10b */
+	case 2: /* 10b */
 		if (lowpan_fetch_skb_u8(skb, &tmp))
 			goto drop;
 
@@ -968,7 +968,7 @@ lowpan_process_data(struct sk_buff *skb)
 	 * Flow Label carried in-line
 	 * ECN + 2-bit Pad + Flow Label (3 bytes), DSCP is elided
 	 */
-	case 2: /* 01b */
+	case 1: /* 01b */
 		if (lowpan_fetch_skb_u8(skb, &tmp))
 			goto drop;
 
@@ -1261,7 +1261,27 @@ static struct header_ops lowpan_header_ops = {
 	.create	= lowpan_header_create,
 };
 
+static struct lock_class_key lowpan_tx_busylock;
+static struct lock_class_key lowpan_netdev_xmit_lock_key;
+
+static void lowpan_set_lockdep_class_one(struct net_device *dev,
+					 struct netdev_queue *txq,
+					 void *_unused)
+{
+	lockdep_set_class(&txq->_xmit_lock,
+			  &lowpan_netdev_xmit_lock_key);
+}
+
+
+static int lowpan_dev_init(struct net_device *dev)
+{
+	netdev_for_each_tx_queue(dev, lowpan_set_lockdep_class_one, NULL);
+	dev->qdisc_tx_busylock = &lowpan_tx_busylock;
+	return 0;
+}
+
 static const struct net_device_ops lowpan_netdev_ops = {
+	.ndo_init		= lowpan_dev_init,
 	.ndo_start_xmit		= lowpan_xmit,
 	.ndo_set_mac_address	= lowpan_set_address,
 };
@@ -1372,8 +1392,10 @@ static int lowpan_newlink(struct net *src_net, struct net_device *dev,
 	real_dev = dev_get_by_index(src_net, nla_get_u32(tb[IFLA_LINK]));
 	if (!real_dev)
 		return -ENODEV;
-	if (real_dev->type != ARPHRD_IEEE802154)
+	if (real_dev->type != ARPHRD_IEEE802154) {
+		dev_put(real_dev);
 		return -EINVAL;
+	}
 
 	lowpan_dev_info(dev)->real_dev = real_dev;
 	lowpan_dev_info(dev)->fragment_tag = 0;

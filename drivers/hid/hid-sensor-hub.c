@@ -255,13 +255,12 @@ int sensor_hub_input_attr_get_raw_value(struct hid_sensor_hub_device *hsdev,
 
 	spin_lock_irqsave(&data->lock, flags);
 	data->pending.status = true;
-	report = sensor_hub_report(report_id, hsdev->hdev, HID_INPUT_REPORT);
-	if (!report) {
-		spin_unlock_irqrestore(&data->lock, flags);
-		goto err_free;
-	}
-	hid_hw_request(hsdev->hdev, report, HID_REQ_GET_REPORT);
 	spin_unlock_irqrestore(&data->lock, flags);
+	report = sensor_hub_report(report_id, hsdev->hdev, HID_INPUT_REPORT);
+	if (!report)
+		goto err_free;
+
+	hid_hw_request(hsdev->hdev, report, HID_REQ_GET_REPORT);
 	wait_for_completion_interruptible_timeout(&data->pending.ready, HZ*5);
 	switch (data->pending.raw_size) {
 	case 1:
@@ -326,7 +325,8 @@ int sensor_hub_input_get_attribute_info(struct hid_sensor_hub_device *hsdev,
 				field->logical == attr_usage_id) {
 				sensor_hub_fill_attr_info(info, i, report->id,
 					field->unit, field->unit_exponent,
-					field->report_size);
+					field->report_size *
+							field->report_count);
 				ret = 0;
 			} else {
 				for (j = 0; j < field->maxusage; ++j) {
@@ -338,7 +338,8 @@ int sensor_hub_input_get_attribute_info(struct hid_sensor_hub_device *hsdev,
 							i, report->id,
 							field->unit,
 							field->unit_exponent,
-							field->report_size);
+							field->report_size *
+							field->report_count);
 						ret = 0;
 						break;
 					}
@@ -425,9 +426,10 @@ static int sensor_hub_raw_event(struct hid_device *hdev,
 		hid_dbg(hdev, "%d collection_index:%x hid:%x sz:%x\n",
 				i, report->field[i]->usage->collection_index,
 				report->field[i]->usage->hid,
-				report->field[i]->report_size/8);
-
-		sz = report->field[i]->report_size/8;
+				(report->field[i]->report_size *
+					report->field[i]->report_count)/8);
+		sz = (report->field[i]->report_size *
+					report->field[i]->report_count)/8;
 		if (pdata->pending.status && pdata->pending.attr_usage_id ==
 				report->field[i]->usage->hid) {
 			hid_dbg(hdev, "data was pending ...\n");

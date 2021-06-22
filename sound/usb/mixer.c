@@ -883,16 +883,20 @@ static void volume_control_quirks(struct usb_mixer_elem_info *cval,
 		}
 		break;
 
+	case USB_ID(0x046d, 0x0807): /* Logitech Webcam C500 */
 	case USB_ID(0x046d, 0x0808):
 	case USB_ID(0x046d, 0x0809):
+	case USB_ID(0x046d, 0x0819): /* Logitech Webcam C210 */
 	case USB_ID(0x046d, 0x081b): /* HD Webcam c310 */
 	case USB_ID(0x046d, 0x081d): /* HD Webcam c510 */
 	case USB_ID(0x046d, 0x0825): /* HD Webcam c270 */
 	case USB_ID(0x046d, 0x0826): /* HD Webcam c525 */
+	case USB_ID(0x046d, 0x08ca): /* Logitech Quickcam Fusion */
 	case USB_ID(0x046d, 0x0991):
+	case USB_ID(0x046d, 0x09a2): /* QuickCam Communicate Deluxe/S7500 */
 	/* Most audio usb devices lie about volume resolution.
 	 * Most Logitech webcams have res = 384.
-	 * Proboly there is some logitech magic behind this number --fishor
+	 * Probably there is some logitech magic behind this number --fishor
 	 */
 		if (!strcmp(kctl->id.name, "Mic Capture Volume")) {
 			snd_printk(KERN_INFO
@@ -2299,26 +2303,6 @@ requeue:
 	}
 }
 
-/* stop any bus activity of a mixer */
-void snd_usb_mixer_inactivate(struct usb_mixer_interface *mixer)
-{
-	usb_kill_urb(mixer->urb);
-	usb_kill_urb(mixer->rc_urb);
-}
-
-int snd_usb_mixer_activate(struct usb_mixer_interface *mixer)
-{
-	int err;
-
-	if (mixer->urb) {
-		err = usb_submit_urb(mixer->urb, GFP_NOIO);
-		if (err < 0)
-			return err;
-	}
-
-	return 0;
-}
-
 /* create the handler for the optional status interrupt endpoint */
 static int snd_usb_mixer_status_create(struct usb_mixer_interface *mixer)
 {
@@ -2417,3 +2401,82 @@ void snd_usb_mixer_disconnect(struct list_head *p)
 	usb_kill_urb(mixer->urb);
 	usb_kill_urb(mixer->rc_urb);
 }
+
+#ifdef CONFIG_PM
+/* stop any bus activity of a mixer */
+static void snd_usb_mixer_inactivate(struct usb_mixer_interface *mixer)
+{
+	usb_kill_urb(mixer->urb);
+	usb_kill_urb(mixer->rc_urb);
+}
+
+static int snd_usb_mixer_activate(struct usb_mixer_interface *mixer)
+{
+	int err;
+
+	if (mixer->urb) {
+		err = usb_submit_urb(mixer->urb, GFP_NOIO);
+		if (err < 0)
+			return err;
+	}
+
+	return 0;
+}
+
+int snd_usb_mixer_suspend(struct usb_mixer_interface *mixer)
+{
+	snd_usb_mixer_inactivate(mixer);
+	return 0;
+}
+
+static int restore_mixer_value(struct usb_mixer_elem_info *cval)
+{
+	int c, err, idx;
+
+	if (cval->cmask) {
+		idx = 0;
+		for (c = 0; c < MAX_CHANNELS; c++) {
+			if (!(cval->cmask & (1 << c)))
+				continue;
+			if (cval->cached & (1 << c)) {
+				err = set_cur_mix_value(cval, c + 1, idx,
+							cval->cache_val[idx]);
+				if (err < 0)
+					return err;
+			}
+			idx++;
+		}
+	} else {
+		/* master */
+		if (cval->cached) {
+			err = set_cur_mix_value(cval, 0, 0, *cval->cache_val);
+			if (err < 0)
+				return err;
+		}
+	}
+
+	return 0;
+}
+
+int snd_usb_mixer_resume(struct usb_mixer_interface *mixer, bool reset_resume)
+{
+	struct usb_mixer_elem_info *cval;
+	int id, err;
+
+	/* FIXME: any mixer quirks? */
+
+	if (reset_resume) {
+		/* restore cached mixer values */
+		for (id = 0; id < MAX_ID_ELEMS; id++) {
+			for (cval = mixer->id_elems[id]; cval;
+			     cval = cval->next_id_elem) {
+				err = restore_mixer_value(cval);
+				if (err < 0)
+					return err;
+			}
+		}
+	}
+
+	return snd_usb_mixer_activate(mixer);
+}
+#endif

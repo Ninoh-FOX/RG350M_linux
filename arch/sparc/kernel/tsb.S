@@ -29,13 +29,17 @@
 	 */
 tsb_miss_dtlb:
 	mov		TLB_TAG_ACCESS, %g4
+	ldxa		[%g4] ASI_DMMU, %g4
+	srlx		%g4, PAGE_SHIFT, %g4
 	ba,pt		%xcc, tsb_miss_page_table_walk
-	 ldxa		[%g4] ASI_DMMU, %g4
+	 sllx		%g4, PAGE_SHIFT, %g4
 
 tsb_miss_itlb:
 	mov		TLB_TAG_ACCESS, %g4
+	ldxa		[%g4] ASI_IMMU, %g4
+	srlx		%g4, PAGE_SHIFT, %g4
 	ba,pt		%xcc, tsb_miss_page_table_walk
-	 ldxa		[%g4] ASI_IMMU, %g4
+	 sllx		%g4, PAGE_SHIFT, %g4
 
 	/* At this point we have:
 	 * %g1 --	PAGE_SIZE TSB entry address
@@ -75,7 +79,7 @@ tsb_miss_page_table_walk:
 	mov		512, %g7
 	andn		%g5, 0x7, %g5
 	sllx		%g7, %g6, %g7
-	srlx		%g4, HPAGE_SHIFT, %g6
+	srlx		%g4, REAL_HPAGE_SHIFT, %g6
 	sub		%g7, 1, %g7
 	and		%g6, %g7, %g6
 	sllx		%g6, 4, %g6
@@ -162,10 +166,10 @@ tsb_miss_page_table_walk_sun4v_fastpath:
 	nop
 	.previous
 
-	rdpr	%tl, %g3
-	cmp	%g3, 1
+	rdpr	%tl, %g7
+	cmp	%g7, 1
 	bne,pn	%xcc, winfix_trampoline
-	 nop
+	 mov	%g3, %g4
 	ba,pt	%xcc, etrap
 	 rd	%pc, %g7
 	call	hugetlb_setup
@@ -283,6 +287,10 @@ tsb_do_dtlb_fault:
 	ldx	[%g4 + HV_FAULT_D_ADDR_OFFSET], %g5
 	nop
 	.previous
+
+	/* Clear context ID bits.  */
+	srlx		%g5, PAGE_SHIFT, %g5
+	sllx		%g5, PAGE_SHIFT, %g5
 
 	be,pt	%xcc, sparc64_realfault_common
 	 mov	FAULT_CODE_DTLB, %g4

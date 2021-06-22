@@ -31,6 +31,7 @@
 #include <asm/nmi.h>
 #include <asm/smp.h>
 #include <asm/alternative.h>
+#include <asm/mmu_context.h>
 #include <asm/timer.h>
 #include <asm/desc.h>
 #include <asm/ldt.h>
@@ -63,7 +64,7 @@ u64 x86_perf_event_update(struct perf_event *event)
 	int shift = 64 - x86_pmu.cntval_bits;
 	u64 prev_raw_count, new_raw_count;
 	int idx = hwc->idx;
-	s64 delta;
+	u64 delta;
 
 	if (idx == INTEL_PMC_IDX_FIXED_BTS)
 		return 0;
@@ -118,6 +119,9 @@ static int x86_pmu_extra_regs(u64 config, struct perf_event *event)
 			continue;
 		if (event->attr.config1 & ~er->valid_mask)
 			return -EINVAL;
+		/* Check if the extra msrs can be safely accessed*/
+		if (!er->extra_msr_access)
+			return -ENXIO;
 
 		reg->idx = er->idx;
 		reg->config = event->attr.config1;
@@ -1192,6 +1196,9 @@ static void x86_pmu_del(struct perf_event *event, int flags)
 	for (i = 0; i < cpuc->n_events; i++) {
 		if (event == cpuc->event_list[i]) {
 
+			if (i >= cpuc->n_events - cpuc->n_added)
+				--cpuc->n_added;
+
 			if (x86_pmu.put_event_constraints)
 				x86_pmu.put_event_constraints(cpuc, event);
 
@@ -1947,21 +1954,25 @@ static unsigned long get_segment_base(unsigned int segment)
 	int idx = segment >> 3;
 
 	if ((segment & SEGMENT_TI_MASK) == SEGMENT_LDT) {
+		struct ldt_struct *ldt;
+
 		if (idx > LDT_ENTRIES)
 			return 0;
 
-		if (idx > current->active_mm->context.size)
+		/* IRQs are off, so this synchronizes with smp_store_release */
+		ldt = lockless_dereference(current->active_mm->context.ldt);
+		if (!ldt || idx > ldt->size)
 			return 0;
 
-		desc = current->active_mm->context.ldt;
+		desc = &ldt->entries[idx];
 	} else {
 		if (idx > GDT_ENTRIES)
 			return 0;
 
-		desc = __this_cpu_ptr(&gdt_page.gdt[0]);
+		desc = __this_cpu_ptr(&gdt_page.gdt[0]) + idx;
 	}
 
-	return get_desc_base(desc + idx);
+	return get_desc_base(desc);
 }
 
 #ifdef CONFIG_COMPAT

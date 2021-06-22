@@ -362,11 +362,11 @@ static int xen_vcpuop_set_next_event(unsigned long delta,
 	WARN_ON(evt->mode != CLOCK_EVT_MODE_ONESHOT);
 
 	single.timeout_abs_ns = get_abs_timeout(delta);
-	single.flags = VCPU_SSHOTTMR_future;
+	/* Get an event anyway, even if the timeout is already expired */
+	single.flags = 0;
 
 	ret = HYPERVISOR_vcpu_op(VCPUOP_set_singleshot_timer, cpu, &single);
-
-	BUG_ON(ret != 0 && ret != -ETIME);
+	BUG_ON(ret != 0);
 
 	return ret;
 }
@@ -445,7 +445,7 @@ void xen_setup_timer(int cpu)
 	irq = bind_virq_to_irqhandler(VIRQ_TIMER, cpu, xen_timer_interrupt,
 				      IRQF_DISABLED|IRQF_PERCPU|
 				      IRQF_NOBALANCING|IRQF_TIMER|
-				      IRQF_FORCE_RESUME,
+				      IRQF_FORCE_RESUME|IRQF_EARLY_RESUME,
 				      name, NULL);
 
 	memcpy(evt, xen_clockevent, sizeof(*evt));

@@ -263,6 +263,16 @@ lpfc_sli4_eq_get(struct lpfc_queue *q)
 		return NULL;
 
 	q->hba_index = idx;
+
+	/*
+	 * insert barrier for instruction interlock : data from the hardware
+	 * must have the valid bit checked before it can be copied and acted
+	 * upon. Given what was seen in lpfc_sli4_cq_get() of speculative
+	 * instructions allowing action on content before valid bit checked,
+	 * add barrier here as well. May not be needed as "content" is a
+	 * single 32-bit entity here (vs multi word structure for cq's).
+	 */
+	mb();
 	return eqe;
 }
 
@@ -368,6 +378,17 @@ lpfc_sli4_cq_get(struct lpfc_queue *q)
 
 	cqe = q->qe[q->hba_index].cqe;
 	q->hba_index = idx;
+
+	/*
+	 * insert barrier for instruction interlock : data from the hardware
+	 * must have the valid bit checked before it can be copied and acted
+	 * upon. Speculative instructions were allowing a bcopy at the start
+	 * of lpfc_sli4_fp_handle_wcqe(), which is called immediately
+	 * after our return, to copy data before the valid bit check above
+	 * was done. As such, some of the copied data was stale. The barrier
+	 * ensures the check is before any data is copied.
+	 */
+	mb();
 	return cqe;
 }
 
@@ -12895,7 +12916,7 @@ lpfc_wq_create(struct lpfc_hba *phba, struct lpfc_queue *wq,
 			       LPFC_WQ_WQE_SIZE_128);
 			bf_set(lpfc_mbx_wq_create_page_size,
 			       &wq_create->u.request_1,
-			       (PAGE_SIZE/SLI4_PAGE_SIZE));
+			       LPFC_WQ_PAGE_SIZE_4096);
 			page = wq_create->u.request_1.page;
 			break;
 		}
@@ -12921,8 +12942,9 @@ lpfc_wq_create(struct lpfc_hba *phba, struct lpfc_queue *wq,
 			       LPFC_WQ_WQE_SIZE_128);
 			break;
 		}
-		bf_set(lpfc_mbx_wq_create_page_size, &wq_create->u.request_1,
-		       (PAGE_SIZE/SLI4_PAGE_SIZE));
+		bf_set(lpfc_mbx_wq_create_page_size,
+		       &wq_create->u.request_1,
+		       LPFC_WQ_PAGE_SIZE_4096);
 		page = wq_create->u.request_1.page;
 		break;
 	default:
@@ -13108,7 +13130,7 @@ lpfc_rq_create(struct lpfc_hba *phba, struct lpfc_queue *hrq,
 		       LPFC_RQE_SIZE_8);
 		bf_set(lpfc_rq_context_page_size,
 		       &rq_create->u.request.context,
-		       (PAGE_SIZE/SLI4_PAGE_SIZE));
+		       LPFC_RQ_PAGE_SIZE_4096);
 	} else {
 		switch (hrq->entry_count) {
 		default:

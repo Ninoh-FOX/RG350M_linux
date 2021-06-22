@@ -68,6 +68,7 @@ struct hci_uart {
 	unsigned long		hdev_flags;
 
 	struct work_struct	init_ready;
+	struct work_struct	write_work;
 
 	struct hci_uart_proto	*proto;
 	void			*priv;
@@ -80,6 +81,7 @@ struct hci_uart {
 /* HCI_UART proto flag bits */
 #define HCI_UART_PROTO_SET	0
 #define HCI_UART_REGISTERED	1
+#define HCI_UART_PROTO_READY	2
 
 /* TX states  */
 #define HCI_UART_SENDING	1

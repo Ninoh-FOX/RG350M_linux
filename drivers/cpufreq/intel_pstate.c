@@ -518,7 +518,8 @@ static void intel_pstate_timer_func(unsigned long __data)
 }
 
 #define ICPU(model, policy) \
-	{ X86_VENDOR_INTEL, 6, model, X86_FEATURE_ANY, (unsigned long)&policy }
+	{ X86_VENDOR_INTEL, 6, model, X86_FEATURE_APERFMPERF,\
+			(unsigned long)&policy }
 
 static const struct x86_cpu_id intel_pstate_cpu_ids[] = {
 	ICPU(0x2a, default_policy),
@@ -549,9 +550,14 @@ static int intel_pstate_init_cpu(unsigned int cpunum)
 
 	cpu = all_cpu_data[cpunum];
 
-	intel_pstate_get_cpu_pstates(cpu);
-
 	cpu->cpu = cpunum;
+	intel_pstate_get_cpu_pstates(cpu);
+	if (!cpu->pstate.current_pstate) {
+		all_cpu_data[cpunum] = NULL;
+		kfree(cpu);
+		return -ENODATA;
+	}
+
 	cpu->pstate_policy =
 		(struct pstate_adjust_policy *)id->driver_data;
 	init_timer_deferrable(&cpu->timer);
@@ -594,6 +600,7 @@ static int intel_pstate_set_policy(struct cpufreq_policy *policy)
 	if (policy->policy == CPUFREQ_POLICY_PERFORMANCE) {
 		limits.min_perf_pct = 100;
 		limits.min_perf = int_tofp(1);
+		limits.max_policy_pct = 100;
 		limits.max_perf_pct = 100;
 		limits.max_perf = int_tofp(1);
 		limits.no_turbo = 0;
@@ -628,7 +635,7 @@ static int intel_pstate_cpu_exit(struct cpufreq_policy *policy)
 {
 	int cpu = policy->cpu;
 
-	del_timer(&all_cpu_data[cpu]->timer);
+	del_timer_sync(&all_cpu_data[cpu]->timer);
 	kfree(all_cpu_data[cpu]);
 	all_cpu_data[cpu] = NULL;
 	return 0;

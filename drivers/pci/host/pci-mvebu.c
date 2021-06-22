@@ -56,14 +56,6 @@
 #define PCIE_DEBUG_CTRL         0x1a60
 #define  PCIE_DEBUG_SOFT_RESET		BIT(20)
 
-/*
- * This product ID is registered by Marvell, and used when the Marvell
- * SoC is not the root complex, but an endpoint on the PCIe bus. It is
- * therefore safe to re-use this PCI ID for our emulated PCI-to-PCI
- * bridge.
- */
-#define MARVELL_EMULATED_PCI_PCI_BRIDGE_ID 0x7846
-
 /* PCI configuration space of a PCI-to-PCI bridge */
 struct mvebu_sw_pci_bridge {
 	u16 vendor;
@@ -274,6 +266,58 @@ static int mvebu_pcie_hw_wr_conf(struct mvebu_pcie_port *port,
 	return ret;
 }
 
+/*
+ * Remove windows, starting from the largest ones to the smallest
+ * ones.
+ */
+static void mvebu_pcie_del_windows(struct mvebu_pcie_port *port,
+				   phys_addr_t base, size_t size)
+{
+	while (size) {
+		size_t sz = 1 << (fls(size) - 1);
+
+		mvebu_mbus_del_window(base, sz);
+		base += sz;
+		size -= sz;
+	}
+}
+
+/*
+ * MBus windows can only have a power of two size, but PCI BARs do not
+ * have this constraint. Therefore, we have to split the PCI BAR into
+ * areas each having a power of two size. We start from the largest
+ * one (i.e highest order bit set in the size).
+ */
+static void mvebu_pcie_add_windows(struct mvebu_pcie_port *port,
+				   unsigned int target, unsigned int attribute,
+				   phys_addr_t base, size_t size,
+				   phys_addr_t remap)
+{
+	size_t size_mapped = 0;
+
+	while (size) {
+		size_t sz = 1 << (fls(size) - 1);
+		int ret;
+
+		ret = mvebu_mbus_add_window_remap_by_id(target, attribute, base,
+							sz, remap);
+		if (ret) {
+			dev_err(&port->pcie->pdev->dev,
+				"Could not create MBus window at 0x%x, size 0x%x: %d\n",
+				base, sz, ret);
+			mvebu_pcie_del_windows(port, base - size_mapped,
+					       size_mapped);
+			return;
+		}
+
+		size -= sz;
+		size_mapped += sz;
+		base += sz;
+		if (remap != MVEBU_MBUS_NO_REMAP)
+			remap += sz;
+	}
+}
+
 static void mvebu_pcie_handle_iobase_change(struct mvebu_pcie_port *port)
 {
 	phys_addr_t iobase;
@@ -284,8 +328,8 @@ static void mvebu_pcie_handle_iobase_change(struct mvebu_pcie_port *port)
 
 		/* If a window was configured, remove it */
 		if (port->iowin_base) {
-			mvebu_mbus_del_window(port->iowin_base,
-					      port->iowin_size);
+			mvebu_pcie_del_windows(port, port->iowin_base,
+					       port->iowin_size);
 			port->iowin_base = 0;
 			port->iowin_size = 0;
 		}
@@ -305,11 +349,11 @@ static void mvebu_pcie_handle_iobase_change(struct mvebu_pcie_port *port)
 	port->iowin_base = port->pcie->io.start + iobase;
 	port->iowin_size = ((0xFFF | ((port->bridge.iolimit & 0xF0) << 8) |
 			    (port->bridge.iolimitupper << 16)) -
-			    iobase);
+			    iobase) + 1;
 
-	mvebu_mbus_add_window_remap_by_id(port->io_target, port->io_attr,
-					  port->iowin_base, port->iowin_size,
-					  iobase);
+	mvebu_pcie_add_windows(port, port->io_target, port->io_attr,
+			       port->iowin_base, port->iowin_size,
+			       iobase);
 
 	pci_ioremap_io(iobase, port->iowin_base);
 }
@@ -321,8 +365,8 @@ static void mvebu_pcie_handle_membase_change(struct mvebu_pcie_port *port)
 
 		/* If a window was configured, remove it */
 		if (port->memwin_base) {
-			mvebu_mbus_del_window(port->memwin_base,
-					      port->memwin_size);
+			mvebu_pcie_del_windows(port, port->memwin_base,
+					       port->memwin_size);
 			port->memwin_base = 0;
 			port->memwin_size = 0;
 		}
@@ -339,10 +383,11 @@ static void mvebu_pcie_handle_membase_change(struct mvebu_pcie_port *port)
 	port->memwin_base  = ((port->bridge.membase & 0xFFF0) << 16);
 	port->memwin_size  =
 		(((port->bridge.memlimit & 0xFFF0) << 16) | 0xFFFFF) -
-		port->memwin_base;
+		port->memwin_base + 1;
 
-	mvebu_mbus_add_window_by_id(port->mem_target, port->mem_attr,
-				    port->memwin_base, port->memwin_size);
+	mvebu_pcie_add_windows(port, port->mem_target, port->mem_attr,
+			       port->memwin_base, port->memwin_size,
+			       MVEBU_MBUS_NO_REMAP);
 }
 
 /*
@@ -357,7 +402,8 @@ static void mvebu_sw_pci_bridge_init(struct mvebu_pcie_port *port)
 
 	bridge->class = PCI_CLASS_BRIDGE_PCI;
 	bridge->vendor = PCI_VENDOR_ID_MARVELL;
-	bridge->device = MARVELL_EMULATED_PCI_PCI_BRIDGE_ID;
+	bridge->device = readl(port->base + PCIE_DEV_ID_OFF) >> 16;
+	bridge->revision = readl(port->base + PCIE_DEV_REV_OFF) & 0xff;
 	bridge->header_type = PCI_HEADER_TYPE_BRIDGE;
 	bridge->cache_line_size = 0x10;
 
@@ -684,14 +730,21 @@ resource_size_t mvebu_pcie_align_resource(struct pci_dev *dev,
 
 	/*
 	 * On the PCI-to-PCI bridge side, the I/O windows must have at
-	 * least a 64 KB size and be aligned on their size, and the
-	 * memory windows must have at least a 1 MB size and be
-	 * aligned on their size
+	 * least a 64 KB size and the memory windows must have at
+	 * least a 1 MB size. Moreover, MBus windows need to have a
+	 * base address aligned on their size, and their size must be
+	 * a power of two. This means that if the BAR doesn't have a
+	 * power of two size, several MBus windows will actually be
+	 * created. We need to ensure that the biggest MBus window
+	 * (which will be the first one) is aligned on its size, which
+	 * explains the rounddown_pow_of_two() being done here.
 	 */
 	if (res->flags & IORESOURCE_IO)
-		return round_up(start, max((resource_size_t)SZ_64K, size));
+		return round_up(start, max_t(resource_size_t, SZ_64K,
+					     rounddown_pow_of_two(size)));
 	else if (res->flags & IORESOURCE_MEM)
-		return round_up(start, max((resource_size_t)SZ_1M, size));
+		return round_up(start, max_t(resource_size_t, SZ_1M,
+					     rounddown_pow_of_two(size)));
 	else
 		return start;
 }
@@ -754,9 +807,9 @@ static int mvebu_get_tgt_attr(struct device_node *np, int devfn,
 	rangesz = pna + na + ns;
 	nranges = rlen / sizeof(__be32) / rangesz;
 
-	for (i = 0; i < nranges; i++) {
+	for (i = 0; i < nranges; i++, range += rangesz) {
 		u32 flags = of_read_number(range, 1);
-		u32 slot = of_read_number(range, 2);
+		u32 slot = of_read_number(range + 1, 1);
 		u64 cpuaddr = of_read_number(range + na, pna);
 		unsigned long rtype;
 
@@ -764,14 +817,14 @@ static int mvebu_get_tgt_attr(struct device_node *np, int devfn,
 			rtype = IORESOURCE_IO;
 		else if (DT_FLAGS_TO_TYPE(flags) == DT_TYPE_MEM32)
 			rtype = IORESOURCE_MEM;
+		else
+			continue;
 
 		if (slot == PCI_SLOT(devfn) && type == rtype) {
 			*tgt = DT_CPUADDR_TO_TARGET(cpuaddr);
 			*attr = DT_CPUADDR_TO_ATTR(cpuaddr);
 			return 0;
 		}
-
-		range += rangesz;
 	}
 
 	return -ENOENT;
@@ -873,11 +926,23 @@ static int __init mvebu_pcie_probe(struct platform_device *pdev)
 			continue;
 		}
 
+		port->clk = of_clk_get_by_name(child, NULL);
+		if (IS_ERR(port->clk)) {
+			dev_err(&pdev->dev, "PCIe%d.%d: cannot get clock\n",
+			       port->port, port->lane);
+			continue;
+		}
+
+		ret = clk_prepare_enable(port->clk);
+		if (ret)
+			continue;
+
 		port->base = mvebu_pcie_map_registers(pdev, child, port);
 		if (IS_ERR(port->base)) {
 			dev_err(&pdev->dev, "PCIe%d.%d: cannot map registers\n",
 				port->port, port->lane);
 			port->base = NULL;
+			clk_disable_unprepare(port->clk);
 			continue;
 		}
 
@@ -893,22 +958,9 @@ static int __init mvebu_pcie_probe(struct platform_device *pdev)
 				 port->port, port->lane);
 		}
 
-		port->clk = of_clk_get_by_name(child, NULL);
-		if (IS_ERR(port->clk)) {
-			dev_err(&pdev->dev, "PCIe%d.%d: cannot get clock\n",
-			       port->port, port->lane);
-			iounmap(port->base);
-			port->haslink = 0;
-			continue;
-		}
-
 		port->dn = child;
-
-		clk_prepare_enable(port->clk);
 		spin_lock_init(&port->conf_lock);
-
 		mvebu_sw_pci_bridge_init(port);
-
 		i++;
 	}
 

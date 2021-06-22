@@ -203,7 +203,7 @@ struct tty_port {
 	wait_queue_head_t	delta_msr_wait;	/* Modem status change */
 	unsigned long		flags;		/* TTY flags ASY_*/
 	unsigned char		console:1,	/* port is a console */
-				low_latency:1;	/* direct buffer flush */
+				low_latency:1;	/* optional: tune for latency */
 	struct mutex		mutex;		/* Locking */
 	struct mutex		buf_mutex;	/* Buffer alloc lock */
 	unsigned char		*xmit_buf;	/* Optional buffer */
@@ -578,7 +578,7 @@ extern void n_tty_inherit_ops(struct tty_ldisc_ops *ops);
 
 /* tty_audit.c */
 #ifdef CONFIG_AUDIT
-extern void tty_audit_add_data(struct tty_struct *tty, unsigned char *data,
+extern void tty_audit_add_data(struct tty_struct *tty, const void *data,
 			       size_t size, unsigned icanon);
 extern void tty_audit_exit(void);
 extern void tty_audit_fork(struct signal_struct *sig);
@@ -586,8 +586,8 @@ extern void tty_audit_tiocsti(struct tty_struct *tty, char ch);
 extern void tty_audit_push(struct tty_struct *tty);
 extern int tty_audit_push_current(void);
 #else
-static inline void tty_audit_add_data(struct tty_struct *tty,
-		unsigned char *data, size_t size, unsigned icanon)
+static inline void tty_audit_add_data(struct tty_struct *tty, const void *data,
+				      size_t size, unsigned icanon)
 {
 }
 static inline void tty_audit_tiocsti(struct tty_struct *tty, char ch)

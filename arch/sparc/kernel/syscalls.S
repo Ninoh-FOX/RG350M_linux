@@ -148,7 +148,25 @@ linux_syscall_trace32:
 	 add	%sp, PTREGS_OFF, %o0
 	brnz,pn	%o0, 3f
 	 mov	-ENOSYS, %o0
+
+	/* Syscall tracing can modify the registers.  */
+	ldx	[%sp + PTREGS_OFF + PT_V9_G1], %g1
+	sethi	%hi(sys_call_table32), %l7
+	ldx	[%sp + PTREGS_OFF + PT_V9_I0], %i0
+	or	%l7, %lo(sys_call_table32), %l7
+	ldx	[%sp + PTREGS_OFF + PT_V9_I1], %i1
+	ldx	[%sp + PTREGS_OFF + PT_V9_I2], %i2
+	ldx	[%sp + PTREGS_OFF + PT_V9_I3], %i3
+	ldx	[%sp + PTREGS_OFF + PT_V9_I4], %i4
+	ldx	[%sp + PTREGS_OFF + PT_V9_I5], %i5
+
+	cmp	%g1, NR_syscalls
+	bgeu,pn	%xcc, 3f
+	 mov	-ENOSYS, %o0
+
+	sll	%g1, 2, %l4
 	srl	%i0, 0, %o0
+	lduw	[%l7 + %l4], %l7
 	srl	%i4, 0, %o4
 	srl	%i1, 0, %o1
 	srl	%i2, 0, %o2
@@ -160,7 +178,25 @@ linux_syscall_trace:
 	 add	%sp, PTREGS_OFF, %o0
 	brnz,pn	%o0, 3f
 	 mov	-ENOSYS, %o0
+
+	/* Syscall tracing can modify the registers.  */
+	ldx	[%sp + PTREGS_OFF + PT_V9_G1], %g1
+	sethi	%hi(sys_call_table64), %l7
+	ldx	[%sp + PTREGS_OFF + PT_V9_I0], %i0
+	or	%l7, %lo(sys_call_table64), %l7
+	ldx	[%sp + PTREGS_OFF + PT_V9_I1], %i1
+	ldx	[%sp + PTREGS_OFF + PT_V9_I2], %i2
+	ldx	[%sp + PTREGS_OFF + PT_V9_I3], %i3
+	ldx	[%sp + PTREGS_OFF + PT_V9_I4], %i4
+	ldx	[%sp + PTREGS_OFF + PT_V9_I5], %i5
+
+	cmp	%g1, NR_syscalls
+	bgeu,pn	%xcc, 3f
+	 mov	-ENOSYS, %o0
+
+	sll	%g1, 2, %l4
 	mov	%i0, %o0
+	lduw	[%l7 + %l4], %l7
 	mov	%i1, %o1
 	mov	%i2, %o2
 	mov	%i3, %o3
@@ -189,7 +225,8 @@ linux_sparc_syscall32:
 	 mov	%i0, %l5				! IEU1
 5:	call	%l7					! CTI	Group brk forced
 	 srl	%i5, 0, %o5				! IEU1
-	ba,a,pt	%xcc, 3f
+	ba,pt	%xcc, 3f
+	 sra	%o0, 0, %o0
 
 	/* Linux native system calls enter here... */
 	.align	32
@@ -217,7 +254,6 @@ linux_sparc_syscall:
 3:	stx	%o0, [%sp + PTREGS_OFF + PT_V9_I0]
 ret_sys_call:
 	ldx	[%sp + PTREGS_OFF + PT_V9_TSTATE], %g3
-	sra	%o0, 0, %o0
 	mov	%ulo(TSTATE_XCARRY | TSTATE_ICARRY), %g2
 	sllx	%g2, 32, %g2
 

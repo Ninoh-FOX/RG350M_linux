@@ -438,21 +438,17 @@ static int nl80211_prepare_wdev_dump(struct sk_buff *skb,
 {
 	int err;
 
-	rtnl_lock();
-
 	if (!cb->args[0]) {
 		err = nlmsg_parse(cb->nlh, GENL_HDRLEN + nl80211_fam.hdrsize,
 				  nl80211_fam.attrbuf, nl80211_fam.maxattr,
 				  nl80211_policy);
 		if (err)
-			goto out_unlock;
+			return err;
 
 		*wdev = __cfg80211_wdev_from_attrs(sock_net(skb->sk),
 						   nl80211_fam.attrbuf);
-		if (IS_ERR(*wdev)) {
-			err = PTR_ERR(*wdev);
-			goto out_unlock;
-		}
+		if (IS_ERR(*wdev))
+			return PTR_ERR(*wdev);
 		*rdev = wiphy_to_dev((*wdev)->wiphy);
 		/* 0 is the first index - add 1 to parse only once */
 		cb->args[0] = (*rdev)->wiphy_idx + 1;
@@ -462,10 +458,8 @@ static int nl80211_prepare_wdev_dump(struct sk_buff *skb,
 		struct wiphy *wiphy = wiphy_idx_to_wiphy(cb->args[0] - 1);
 		struct wireless_dev *tmp;
 
-		if (!wiphy) {
-			err = -ENODEV;
-			goto out_unlock;
-		}
+		if (!wiphy)
+			return -ENODEV;
 		*rdev = wiphy_to_dev(wiphy);
 		*wdev = NULL;
 
@@ -476,21 +470,11 @@ static int nl80211_prepare_wdev_dump(struct sk_buff *skb,
 			}
 		}
 
-		if (!*wdev) {
-			err = -ENODEV;
-			goto out_unlock;
-		}
+		if (!*wdev)
+			return -ENODEV;
 	}
 
 	return 0;
- out_unlock:
-	rtnl_unlock();
-	return err;
-}
-
-static void nl80211_finish_wdev_dump(struct cfg80211_registered_device *rdev)
-{
-	rtnl_unlock();
 }
 
 /* IE validation */
@@ -1655,9 +1639,10 @@ static int nl80211_dump_wiphy(struct sk_buff *skb, struct netlink_callback *cb)
 				 * We can then retry with the larger buffer.
 				 */
 				if ((ret == -ENOBUFS || ret == -EMSGSIZE) &&
-				    !skb->len &&
+				    !skb->len && !state->split &&
 				    cb->min_dump_alloc < 4096) {
 					cb->min_dump_alloc = 4096;
+					state->split_start = 0;
 					rtnl_unlock();
 					return 1;
 				}
@@ -2658,6 +2643,9 @@ static int nl80211_get_key(struct sk_buff *skb, struct genl_info *info)
 	if (!rdev->ops->get_key)
 		return -EOPNOTSUPP;
 
+	if (!pairwise && mac_addr && !(rdev->wiphy.flags & WIPHY_FLAG_IBSS_RSN))
+		return -ENOENT;
+
 	msg = nlmsg_new(NLMSG_DEFAULT_SIZE, GFP_KERNEL);
 	if (!msg)
 		return -ENOMEM;
@@ -2676,10 +2664,6 @@ static int nl80211_get_key(struct sk_buff *skb, struct genl_info *info)
 	if (mac_addr &&
 	    nla_put(msg, NL80211_ATTR_MAC, ETH_ALEN, mac_addr))
 		goto nla_put_failure;
-
-	if (pairwise && mac_addr &&
-	    !(rdev->wiphy.flags & WIPHY_FLAG_IBSS_RSN))
-		return -ENOENT;
 
 	err = rdev_get_key(rdev, dev, key_idx, pairwise, mac_addr, &cookie,
 			   get_key_callback);
@@ -2851,7 +2835,7 @@ static int nl80211_del_key(struct sk_buff *skb, struct genl_info *info)
 	wdev_lock(dev->ieee80211_ptr);
 	err = nl80211_key_allowed(dev->ieee80211_ptr);
 
-	if (key.type == NL80211_KEYTYPE_PAIRWISE && mac_addr &&
+	if (key.type == NL80211_KEYTYPE_GROUP && mac_addr &&
 	    !(rdev->wiphy.flags & WIPHY_FLAG_IBSS_RSN))
 		err = -ENOENT;
 
@@ -3607,9 +3591,10 @@ static int nl80211_dump_station(struct sk_buff *skb,
 	int sta_idx = cb->args[2];
 	int err;
 
+	rtnl_lock();
 	err = nl80211_prepare_wdev_dump(skb, cb, &dev, &wdev);
 	if (err)
-		return err;
+		goto out_err;
 
 	if (!wdev->netdev) {
 		err = -EINVAL;
@@ -3645,7 +3630,7 @@ static int nl80211_dump_station(struct sk_buff *skb,
 	cb->args[2] = sta_idx;
 	err = skb->len;
  out_err:
-	nl80211_finish_wdev_dump(dev);
+	rtnl_unlock();
 
 	return err;
 }
@@ -4096,6 +4081,16 @@ static int nl80211_new_station(struct sk_buff *skb, struct genl_info *info)
 	if (parse_station_flags(info, dev->ieee80211_ptr->iftype, &params))
 		return -EINVAL;
 
+	/* HT/VHT requires QoS, but if we don't have that just ignore HT/VHT
+	 * as userspace might just pass through the capabilities from the IEs
+	 * directly, rather than enforcing this restriction and returning an
+	 * error in this case.
+	 */
+	if (!(params.sta_flags_set & BIT(NL80211_STA_FLAG_WME))) {
+		params.ht_capa = NULL;
+		params.vht_capa = NULL;
+	}
+
 	/* When you run into this, adjust the code below for the new flag */
 	BUILD_BUG_ON(NL80211_STA_FLAG_MAX != 7);
 
@@ -4263,9 +4258,10 @@ static int nl80211_dump_mpath(struct sk_buff *skb,
 	int path_idx = cb->args[2];
 	int err;
 
+	rtnl_lock();
 	err = nl80211_prepare_wdev_dump(skb, cb, &dev, &wdev);
 	if (err)
-		return err;
+		goto out_err;
 
 	if (!dev->ops->dump_mpath) {
 		err = -EOPNOTSUPP;
@@ -4299,7 +4295,7 @@ static int nl80211_dump_mpath(struct sk_buff *skb,
 	cb->args[2] = path_idx;
 	err = skb->len;
  out_err:
-	nl80211_finish_wdev_dump(dev);
+	rtnl_unlock();
 	return err;
 }
 
@@ -5843,9 +5839,12 @@ static int nl80211_dump_scan(struct sk_buff *skb, struct netlink_callback *cb)
 	int start = cb->args[2], idx = 0;
 	int err;
 
+	rtnl_lock();
 	err = nl80211_prepare_wdev_dump(skb, cb, &rdev, &wdev);
-	if (err)
+	if (err) {
+		rtnl_unlock();
 		return err;
+	}
 
 	wdev_lock(wdev);
 	spin_lock_bh(&rdev->bss_lock);
@@ -5868,7 +5867,7 @@ static int nl80211_dump_scan(struct sk_buff *skb, struct netlink_callback *cb)
 	wdev_unlock(wdev);
 
 	cb->args[2] = idx;
-	nl80211_finish_wdev_dump(rdev);
+	rtnl_unlock();
 
 	return skb->len;
 }
@@ -5941,9 +5940,10 @@ static int nl80211_dump_survey(struct sk_buff *skb,
 	int survey_idx = cb->args[2];
 	int res;
 
+	rtnl_lock();
 	res = nl80211_prepare_wdev_dump(skb, cb, &dev, &wdev);
 	if (res)
-		return res;
+		goto out_err;
 
 	if (!wdev->netdev) {
 		res = -EINVAL;
@@ -5989,7 +5989,7 @@ static int nl80211_dump_survey(struct sk_buff *skb,
 	cb->args[2] = survey_idx;
 	res = skb->len;
  out_err:
-	nl80211_finish_wdev_dump(dev);
+	rtnl_unlock();
 	return res;
 }
 
@@ -6795,6 +6795,9 @@ void cfg80211_testmode_event(struct sk_buff *skb, gfp_t gfp)
 	struct cfg80211_registered_device *rdev = ((void **)skb->cb)[0];
 	void *hdr = ((void **)skb->cb)[1];
 	struct nlattr *data = ((void **)skb->cb)[2];
+
+	/* clear CB data for netlink core to own from now on */
+	memset(skb->cb, 0, sizeof(skb->cb));
 
 	nla_nest_end(skb, data);
 	genlmsg_end(skb, hdr);
@@ -11143,7 +11146,7 @@ static int nl80211_netlink_notify(struct notifier_block * nb,
 	struct wireless_dev *wdev;
 	struct cfg80211_beacon_registration *reg, *tmp;
 
-	if (state != NETLINK_URELEASE)
+	if (state != NETLINK_URELEASE || notify->protocol != NETLINK_GENERIC)
 		return NOTIFY_DONE;
 
 	rcu_read_lock();

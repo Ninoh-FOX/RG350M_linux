@@ -276,6 +276,15 @@ out_eof:
 	return -EBADCOOKIE;
 }
 
+static bool
+nfs_readdir_inode_mapping_valid(struct nfs_inode *nfsi)
+{
+	if (nfsi->cache_validity & (NFS_INO_INVALID_ATTR|NFS_INO_INVALID_DATA))
+		return false;
+	smp_rmb();
+	return !test_bit(NFS_INO_INVALIDATING, &nfsi->flags);
+}
+
 static
 int nfs_readdir_search_for_cookie(struct nfs_cache_array *array, nfs_readdir_descriptor_t *desc)
 {
@@ -289,8 +298,8 @@ int nfs_readdir_search_for_cookie(struct nfs_cache_array *array, nfs_readdir_des
 			struct nfs_open_dir_context *ctx = desc->file->private_data;
 
 			new_pos = desc->current_index + i;
-			if (ctx->attr_gencount != nfsi->attr_gencount
-			    || (nfsi->cache_validity & (NFS_INO_INVALID_ATTR|NFS_INO_INVALID_DATA))) {
+			if (ctx->attr_gencount != nfsi->attr_gencount ||
+			    !nfs_readdir_inode_mapping_valid(nfsi)) {
 				ctx->duped = 0;
 				ctx->attr_gencount = nfsi->attr_gencount;
 			} else if (new_pos < desc->ctx->pos) {
@@ -501,6 +510,9 @@ int nfs_readdir_page_filler(nfs_readdir_descriptor_t *desc, struct nfs_entry *en
 	if (scratch == NULL)
 		return -ENOMEM;
 
+	if (buflen == 0)
+		goto out_nopages;
+
 	xdr_init_decode_pages(&stream, &buf, xdr_pages, buflen);
 	xdr_set_scratch_buffer(&stream, page_address(scratch), PAGE_SIZE);
 
@@ -522,6 +534,7 @@ int nfs_readdir_page_filler(nfs_readdir_descriptor_t *desc, struct nfs_entry *en
 			break;
 	} while (!entry->eof);
 
+out_nopages:
 	if (count == 0 || (status == -EBADCOOKIE && entry->eof != 0)) {
 		array = nfs_readdir_get_array(page);
 		if (!IS_ERR(array)) {
@@ -1139,7 +1152,13 @@ out_zap_parent:
 	if (inode && S_ISDIR(inode->i_mode)) {
 		/* Purge readdir caches. */
 		nfs_zap_caches(inode);
-		if (dentry->d_flags & DCACHE_DISCONNECTED)
+		/*
+		 * We can't d_drop the root of a disconnected tree:
+		 * its d_hash is on the s_anon list and d_drop() would hide
+		 * it from shrink_dcache_for_unmount(), leading to busy
+		 * inodes on unmount and further oopses.
+		 */
+		if (IS_ROOT(dentry))
 			goto out_valid;
 	}
 	/* If we have submounts, don't unhash ! */
@@ -1464,10 +1483,11 @@ int nfs_atomic_open(struct inode *dir, struct dentry *dentry,
 		err = PTR_ERR(inode);
 		trace_nfs_atomic_open_exit(dir, ctx, open_flags, err);
 		put_nfs_open_context(ctx);
+		d_drop(dentry);
 		switch (err) {
 		case -ENOENT:
-			d_drop(dentry);
 			d_add(dentry, NULL);
+			nfs_set_verifier(dentry, nfs_save_change_attribute(dir));
 			break;
 		case -EISDIR:
 		case -ENOTDIR:
@@ -1852,6 +1872,11 @@ int nfs_symlink(struct inode *dir, struct dentry *dentry, const char *symname)
 							GFP_KERNEL)) {
 		SetPageUptodate(page);
 		unlock_page(page);
+		/*
+		 * add_to_page_cache_lru() grabs an extra page refcount.
+		 * Drop it here to avoid leaking this page later.
+		 */
+		page_cache_release(page);
 	} else
 		__free_page(page);
 

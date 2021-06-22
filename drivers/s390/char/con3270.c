@@ -407,6 +407,10 @@ con3270_irq(struct con3270 *cp, struct raw3270_request *rq, struct irb *irb)
 		else
 			/* Normal end. Copy residual count. */
 			rq->rescnt = irb->scsw.cmd.count;
+	} else if (irb->scsw.cmd.dstat & DEV_STAT_DEV_END) {
+		/* Interrupt without an outstanding request -> update all */
+		cp->update_flags = CON_UPDATE_ALL;
+		con3270_set_timer(cp, 1);
 	}
 	return RAW3270_IO_DONE;
 }
@@ -576,7 +580,6 @@ static struct console con3270 = {
 static int __init
 con3270_init(void)
 {
-	struct ccw_device *cdev;
 	struct raw3270 *rp;
 	void *cbuf;
 	int i;
@@ -591,10 +594,7 @@ con3270_init(void)
 		cpcmd("TERM AUTOCR OFF", NULL, 0, NULL);
 	}
 
-	cdev = ccw_device_probe_console();
-	if (IS_ERR(cdev))
-		return -ENODEV;
-	rp = raw3270_setup_console(cdev);
+	rp = raw3270_setup_console();
 	if (IS_ERR(rp))
 		return PTR_ERR(rp);
 

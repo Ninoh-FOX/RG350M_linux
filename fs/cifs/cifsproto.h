@@ -127,6 +127,9 @@ extern u64 cifs_UnixTimeToNT(struct timespec);
 extern struct timespec cnvrtDosUnixTm(__le16 le_date, __le16 le_time,
 				      int offset);
 extern void cifs_set_oplock_level(struct cifsInodeInfo *cinode, __u32 oplock);
+extern int cifs_get_writer(struct cifsInodeInfo *cinode);
+extern void cifs_put_writer(struct cifsInodeInfo *cinode);
+extern void cifs_done_oplock_break(struct cifsInodeInfo *cinode);
 extern int cifs_unlock_range(struct cifsFileInfo *cfile,
 			     struct file_lock *flock, const unsigned int xid);
 extern int cifs_push_mandatory_locks(struct cifsFileInfo *cfile);
@@ -176,7 +179,7 @@ extern int cifs_read_from_socket(struct TCP_Server_Info *server, char *buf,
 extern int cifs_readv_from_socket(struct TCP_Server_Info *server,
 		struct kvec *iov_orig, unsigned int nr_segs,
 		unsigned int to_read);
-extern void cifs_setup_cifs_sb(struct smb_vol *pvolume_info,
+extern int cifs_setup_cifs_sb(struct smb_vol *pvolume_info,
 			       struct cifs_sb_info *cifs_sb);
 extern int cifs_match_super(struct super_block *, void *);
 extern void cifs_cleanup_volume_info(struct smb_vol *pvolume_info);
@@ -196,6 +199,9 @@ extern void cifs_add_pending_open_locked(struct cifs_fid *fid,
 					 struct tcon_link *tlink,
 					 struct cifs_pending_open *open);
 extern void cifs_del_pending_open(struct cifs_pending_open *open);
+extern void cifs_put_tcp_session(struct TCP_Server_Info *server,
+				 int from_reconnect);
+extern void cifs_put_tcon(struct cifs_tcon *tcon);
 
 #if IS_ENABLED(CONFIG_CIFS_DFS_UPCALL)
 extern void cifs_dfs_release_automount_timer(void);
@@ -475,9 +481,10 @@ extern int CIFSGetExtAttr(const unsigned int xid, struct cifs_tcon *tcon,
 			const int netfid, __u64 *pExtAttrBits, __u64 *pMask);
 extern void cifs_autodisable_serverino(struct cifs_sb_info *cifs_sb);
 extern bool CIFSCouldBeMFSymlink(const struct cifs_fattr *fattr);
-extern int CIFSCheckMFSymlink(struct cifs_fattr *fattr,
-		const unsigned char *path,
-		struct cifs_sb_info *cifs_sb, unsigned int xid);
+extern int CIFSCheckMFSymlink(unsigned int xid, struct cifs_tcon *tcon,
+			      struct cifs_sb_info *cifs_sb,
+			      struct cifs_fattr *fattr,
+			      const unsigned char *path);
 extern int mdfour(unsigned char *, unsigned char *, int);
 extern int E_md4hash(const unsigned char *passwd, unsigned char *p16,
 			const struct nls_table *codepage);

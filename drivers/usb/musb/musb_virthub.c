@@ -105,7 +105,7 @@ static void musb_port_suspend(struct musb *musb, bool do_suspend)
 
 		/* later, GetPortStatus will stop RESUME signaling */
 		musb->port1_status |= MUSB_PORT_STAT_RESUME;
-		musb->rh_timer = jiffies + msecs_to_jiffies(20);
+		musb->rh_timer = jiffies + msecs_to_jiffies(USB_RESUME_TIMEOUT);
 	}
 }
 
@@ -218,6 +218,21 @@ int musb_hub_status_data(struct usb_hcd *hcd, char *buf)
 		retval = 1;
 	}
 	return retval;
+}
+
+static int musb_has_gadget(struct musb *musb)
+{
+	/*
+	 * In host-only mode we start a connection right away. In OTG mode
+	 * we have to wait until we loaded a gadget. We don't really need a
+	 * gadget if we operate as a host but we should not start a session
+	 * as a device without a gadget or else we explode.
+	 */
+#ifdef CONFIG_USB_MUSB_HOST
+	return 1;
+#else
+	return musb->port_mode == MUSB_PORT_MODE_HOST;
+#endif
 }
 
 int musb_hub_control(
@@ -362,7 +377,7 @@ int musb_hub_control(
 			 * initialization logic, e.g. for OTG, or change any
 			 * logic relating to VBUS power-up.
 			 */
-			if (!hcd->self.is_b_host)
+			if (!hcd->self.is_b_host && musb_has_gadget(musb))
 				musb_start(musb);
 			break;
 		case USB_PORT_FEAT_RESET:

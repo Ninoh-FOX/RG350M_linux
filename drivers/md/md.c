@@ -1119,6 +1119,7 @@ static int super_90_validate(struct mddev *mddev, struct md_rdev *rdev)
 	rdev->raid_disk = -1;
 	clear_bit(Faulty, &rdev->flags);
 	clear_bit(In_sync, &rdev->flags);
+	clear_bit(Bitmap_sync, &rdev->flags);
 	clear_bit(WriteMostly, &rdev->flags);
 
 	if (mddev->raid_disks == 0) {
@@ -1197,6 +1198,8 @@ static int super_90_validate(struct mddev *mddev, struct md_rdev *rdev)
 		 */
 		if (ev1 < mddev->bitmap->events_cleared)
 			return 0;
+		if (ev1 < mddev->events)
+			set_bit(Bitmap_sync, &rdev->flags);
 	} else {
 		if (ev1 < mddev->events)
 			/* just a hot-add of a new device, leave raid_disk at -1 */
@@ -1605,6 +1608,7 @@ static int super_1_validate(struct mddev *mddev, struct md_rdev *rdev)
 	rdev->raid_disk = -1;
 	clear_bit(Faulty, &rdev->flags);
 	clear_bit(In_sync, &rdev->flags);
+	clear_bit(Bitmap_sync, &rdev->flags);
 	clear_bit(WriteMostly, &rdev->flags);
 
 	if (mddev->raid_disks == 0) {
@@ -1687,6 +1691,8 @@ static int super_1_validate(struct mddev *mddev, struct md_rdev *rdev)
 		 */
 		if (ev1 < mddev->bitmap->events_cleared)
 			return 0;
+		if (ev1 < mddev->events)
+			set_bit(Bitmap_sync, &rdev->flags);
 	} else {
 		if (ev1 < mddev->events)
 			/* just a hot-add of a new device, leave raid_disk at -1 */
@@ -2830,6 +2836,7 @@ slot_store(struct md_rdev *rdev, const char *buf, size_t len)
 		else
 			rdev->saved_raid_disk = -1;
 		clear_bit(In_sync, &rdev->flags);
+		clear_bit(Bitmap_sync, &rdev->flags);
 		err = rdev->mddev->pers->
 			hot_add_disk(rdev->mddev, rdev);
 		if (err) {
@@ -3620,6 +3627,7 @@ level_store(struct mddev *mddev, const char *buf, size_t len)
 		mddev->in_sync = 1;
 		del_timer_sync(&mddev->safemode_timer);
 	}
+	blk_set_stacking_limits(&mddev->queue->limits);
 	pers->run(mddev);
 	set_bit(MD_CHANGE_DEVS, &mddev->flags);
 	mddev_resume(mddev);
@@ -5307,6 +5315,8 @@ EXPORT_SYMBOL_GPL(md_stop_writes);
 static void __md_stop(struct mddev *mddev)
 {
 	mddev->ready = 0;
+	/* Ensure ->event_work is done */
+	flush_workqueue(md_misc_wq);
 	mddev->pers->stop(mddev);
 	if (mddev->pers->sync_request && mddev->to_remove == NULL)
 		mddev->to_remove = &md_redundancy_group;
@@ -5634,8 +5644,7 @@ static int get_bitmap_file(struct mddev * mddev, void __user * arg)
 	char *ptr, *buf = NULL;
 	int err = -ENOMEM;
 
-	file = kmalloc(sizeof(*file), GFP_NOIO);
-
+	file = kzalloc(sizeof(*file), GFP_NOIO);
 	if (!file)
 		goto out;
 
@@ -5772,6 +5781,7 @@ static int add_new_disk(struct mddev * mddev, mdu_disk_info_t *info)
 			    info->raid_disk < mddev->raid_disks) {
 				rdev->raid_disk = info->raid_disk;
 				set_bit(In_sync, &rdev->flags);
+				clear_bit(Bitmap_sync, &rdev->flags);
 			} else
 				rdev->raid_disk = -1;
 		} else
@@ -6224,7 +6234,7 @@ static int update_array_info(struct mddev *mddev, mdu_array_info_t *info)
 	    mddev->ctime         != info->ctime         ||
 	    mddev->level         != info->level         ||
 /*	    mddev->layout        != info->layout        || */
-	    !mddev->persistent	 != info->not_persistent||
+	    mddev->persistent	 != !info->not_persistent ||
 	    mddev->chunk_sectors != info->chunk_size >> 9 ||
 	    /* ignore bottom 8 bits of state, and allow SB_BITMAP_PRESENT to change */
 	    ((state^info->state) & 0xfffffe00)
@@ -6421,7 +6431,7 @@ static int md_ioctl(struct block_device *bdev, fmode_t mode,
 		/* need to ensure recovery thread has run */
 		wait_event_interruptible_timeout(mddev->sb_wait,
 						 !test_bit(MD_RECOVERY_NEEDED,
-							   &mddev->flags),
+							   &mddev->recovery),
 						 msecs_to_jiffies(5000));
 	if (cmd == STOP_ARRAY || cmd == STOP_ARRAY_RO) {
 		/* Need to flush page cache, and ensure no-one else opens
@@ -7362,8 +7372,10 @@ void md_do_sync(struct md_thread *thread)
 	/* just incase thread restarts... */
 	if (test_bit(MD_RECOVERY_DONE, &mddev->recovery))
 		return;
-	if (mddev->ro) /* never try to sync a read-only array */
+	if (mddev->ro) {/* never try to sync a read-only array */
+		set_bit(MD_RECOVERY_INTR, &mddev->recovery);
 		return;
+	}
 
 	if (test_bit(MD_RECOVERY_SYNC, &mddev->recovery)) {
 		if (test_bit(MD_RECOVERY_CHECK, &mddev->recovery)) {
@@ -7473,6 +7485,19 @@ void md_do_sync(struct md_thread *thread)
 			    rdev->recovery_offset < j)
 				j = rdev->recovery_offset;
 		rcu_read_unlock();
+
+		/* If there is a bitmap, we need to make sure all
+		 * writes that started before we added a spare
+		 * complete before we start doing a recovery.
+		 * Otherwise the write might complete and (via
+		 * bitmap_endwrite) set a bit in the bitmap after the
+		 * recovery has checked that bit and skipped that
+		 * region.
+		 */
+		if (mddev->bitmap) {
+			mddev->pers->quiesce(mddev, 1);
+			mddev->pers->quiesce(mddev, 0);
+		}
 	}
 
 	printk(KERN_INFO "md: %s of RAID array %s\n", desc, mdname(mddev));
@@ -7730,7 +7755,8 @@ static int remove_and_add_spares(struct mddev *mddev,
 		if (test_bit(Faulty, &rdev->flags))
 			continue;
 		if (mddev->ro &&
-		    rdev->saved_raid_disk < 0)
+		    ! (rdev->saved_raid_disk >= 0 &&
+		       !test_bit(Bitmap_sync, &rdev->flags)))
 			continue;
 
 		rdev->recovery_offset = 0;
@@ -7791,7 +7817,7 @@ void md_check_recovery(struct mddev *mddev)
 	if (mddev->ro && !test_bit(MD_RECOVERY_NEEDED, &mddev->recovery))
 		return;
 	if ( ! (
-		(mddev->flags & ~ (1<<MD_CHANGE_PENDING)) ||
+		(mddev->flags & MD_UPDATE_SB_FLAGS & ~ (1<<MD_CHANGE_PENDING)) ||
 		test_bit(MD_RECOVERY_NEEDED, &mddev->recovery) ||
 		test_bit(MD_RECOVERY_DONE, &mddev->recovery) ||
 		(mddev->external == 0 && mddev->safemode == 1) ||
@@ -7811,9 +7837,13 @@ void md_check_recovery(struct mddev *mddev)
 			 * As we only add devices that are already in-sync,
 			 * we can activate the spares immediately.
 			 */
-			clear_bit(MD_RECOVERY_NEEDED, &mddev->recovery);
 			remove_and_add_spares(mddev, NULL);
-			mddev->pers->spare_active(mddev);
+			/* There is no thread, but we need to call
+			 * ->spare_active and clear saved_raid_disk
+			 */
+			set_bit(MD_RECOVERY_INTR, &mddev->recovery);
+			md_reap_sync_thread(mddev);
+			clear_bit(MD_RECOVERY_NEEDED, &mddev->recovery);
 			goto unlock;
 		}
 
@@ -8507,7 +8537,8 @@ static int md_notify_reboot(struct notifier_block *this,
 		if (mddev_trylock(mddev)) {
 			if (mddev->pers)
 				__md_stop_writes(mddev);
-			mddev->safemode = 2;
+			if (mddev->persistent)
+				mddev->safemode = 2;
 			mddev_unlock(mddev);
 		}
 		need_delay = 1;

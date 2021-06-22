@@ -731,13 +731,13 @@ static inline void __remove_ddw(struct device_node *np, const u32 *ddw_avail, u6
 			np->full_name, ret, ddw_avail[2], liobn);
 }
 
-static void remove_ddw(struct device_node *np)
+static void remove_ddw(struct device_node *np, bool remove_prop)
 {
 	struct dynamic_dma_window_prop *dwp;
 	struct property *win64;
 	const u32 *ddw_avail;
 	u64 liobn;
-	int len, ret;
+	int len, ret = 0;
 
 	ddw_avail = of_get_property(np, "ibm,ddw-applicable", &len);
 	win64 = of_find_property(np, DIRECT64_PROPNAME, NULL);
@@ -763,7 +763,8 @@ static void remove_ddw(struct device_node *np)
 	__remove_ddw(np, ddw_avail, liobn);
 
 delprop:
-	ret = of_remove_property(np, win64);
+	if (remove_prop)
+		ret = of_remove_property(np, win64);
 	if (ret)
 		pr_warning("%s: failed to remove direct window property: %d\n",
 			np->full_name, ret);
@@ -835,7 +836,7 @@ static int find_existing_ddw_windows(void)
 		 * can clear the table or find the holes. To that end,
 		 * first, remove any existing DDW configuration.
 		 */
-		remove_ddw(pdn);
+		remove_ddw(pdn, true);
 
 		/*
 		 * Second, if we are running on a new enough level of
@@ -860,7 +861,8 @@ machine_arch_initcall(pseries, find_existing_ddw_windows);
 static int query_ddw(struct pci_dev *dev, const u32 *ddw_avail,
 			struct ddw_query_response *query)
 {
-	struct eeh_dev *edev;
+	struct device_node *dn;
+	struct pci_dn *pdn;
 	u32 cfg_addr;
 	u64 buid;
 	int ret;
@@ -871,11 +873,10 @@ static int query_ddw(struct pci_dev *dev, const u32 *ddw_avail,
 	 * Retrieve them from the pci device, not the node with the
 	 * dma-window property
 	 */
-	edev = pci_dev_to_eeh_dev(dev);
-	cfg_addr = edev->config_addr;
-	if (edev->pe_config_addr)
-		cfg_addr = edev->pe_config_addr;
-	buid = edev->phb->buid;
+	dn = pci_device_to_OF_node(dev);
+	pdn = PCI_DN(dn);
+	buid = pdn->phb->buid;
+	cfg_addr = ((pdn->busno << 16) | (pdn->devfn << 8));
 
 	ret = rtas_call(ddw_avail[0], 3, 5, (u32 *)query,
 		  cfg_addr, BUID_HI(buid), BUID_LO(buid));
@@ -889,7 +890,8 @@ static int create_ddw(struct pci_dev *dev, const u32 *ddw_avail,
 			struct ddw_create_response *create, int page_shift,
 			int window_shift)
 {
-	struct eeh_dev *edev;
+	struct device_node *dn;
+	struct pci_dn *pdn;
 	u32 cfg_addr;
 	u64 buid;
 	int ret;
@@ -900,11 +902,10 @@ static int create_ddw(struct pci_dev *dev, const u32 *ddw_avail,
 	 * Retrieve them from the pci device, not the node with the
 	 * dma-window property
 	 */
-	edev = pci_dev_to_eeh_dev(dev);
-	cfg_addr = edev->config_addr;
-	if (edev->pe_config_addr)
-		cfg_addr = edev->pe_config_addr;
-	buid = edev->phb->buid;
+	dn = pci_device_to_OF_node(dev);
+	pdn = PCI_DN(dn);
+	buid = pdn->phb->buid;
+	cfg_addr = ((pdn->busno << 16) | (pdn->devfn << 8));
 
 	do {
 		/* extra outputs are LIOBN and dma-addr (hi, lo) */
@@ -1125,7 +1126,7 @@ out_free_window:
 	kfree(window);
 
 out_clear_window:
-	remove_ddw(pdn);
+	remove_ddw(pdn, true);
 
 out_free_prop:
 	kfree(win64->name);
@@ -1337,7 +1338,14 @@ static int iommu_reconfig_notifier(struct notifier_block *nb, unsigned long acti
 
 	switch (action) {
 	case OF_RECONFIG_DETACH_NODE:
-		remove_ddw(np);
+		/*
+		 * Removing the property will invoke the reconfig
+		 * notifier again, which causes dead-lock on the
+		 * read-write semaphore of the notifier chain. So
+		 * we have to remove the property when releasing
+		 * the device node.
+		 */
+		remove_ddw(np, false);
 		if (pci && pci->iommu_table)
 			iommu_free_table(pci->iommu_table, np->full_name);
 

@@ -57,11 +57,14 @@ _GLOBAL(call_do_softirq)
 	mtlr	r0
 	blr
 
+/*
+ * void call_do_irq(struct pt_regs *regs, struct thread_info *irqtp);
+ */
 _GLOBAL(call_do_irq)
 	mflr	r0
 	stw	r0,4(r1)
 	lwz	r10,THREAD+KSP_LIMIT(r2)
-	addi	r11,r3,THREAD_INFO_GAP
+	addi	r11,r4,THREAD_INFO_GAP
 	stwu	r1,THREAD_SIZE-STACK_FRAME_OVERHEAD(r4)
 	mr	r1,r4
 	stw	r10,8(r1)
@@ -310,7 +313,7 @@ _GLOBAL(flush_instruction_cache)
 	lis	r3, KERNELBASE@h
 	iccci	0,r3
 #endif
-#elif CONFIG_FSL_BOOKE
+#elif defined(CONFIG_FSL_BOOKE)
 BEGIN_FTR_SECTION
 	mfspr   r3,SPRN_L1CSR0
 	ori     r3,r3,L1CSR0_CFI|L1CSR0_CLFC

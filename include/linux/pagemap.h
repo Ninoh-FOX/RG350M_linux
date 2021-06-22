@@ -99,7 +99,7 @@ static inline void mapping_set_gfp_mask(struct address_space *m, gfp_t mask)
 
 #define page_cache_get(page)		get_page(page)
 #define page_cache_release(page)	put_page(page)
-void release_pages(struct page **pages, int nr, int cold);
+void release_pages(struct page **pages, int nr, bool cold);
 
 /*
  * speculatively take a reference to a page.
@@ -243,12 +243,116 @@ static inline struct page *page_cache_alloc_readahead(struct address_space *x)
 
 typedef int filler_t(void *, struct page *);
 
-extern struct page * find_get_page(struct address_space *mapping,
-				pgoff_t index);
-extern struct page * find_lock_page(struct address_space *mapping,
-				pgoff_t index);
-extern struct page * find_or_create_page(struct address_space *mapping,
-				pgoff_t index, gfp_t gfp_mask);
+pgoff_t page_cache_next_hole(struct address_space *mapping,
+			     pgoff_t index, unsigned long max_scan);
+pgoff_t page_cache_prev_hole(struct address_space *mapping,
+			     pgoff_t index, unsigned long max_scan);
+
+#define FGP_ACCESSED		0x00000001
+#define FGP_LOCK		0x00000002
+#define FGP_CREAT		0x00000004
+#define FGP_WRITE		0x00000008
+#define FGP_NOFS		0x00000010
+#define FGP_NOWAIT		0x00000020
+
+struct page *pagecache_get_page(struct address_space *mapping, pgoff_t offset,
+		int fgp_flags, gfp_t cache_gfp_mask);
+
+/**
+ * find_get_page - find and get a page reference
+ * @mapping: the address_space to search
+ * @offset: the page index
+ *
+ * Looks up the page cache slot at @mapping & @offset.  If there is a
+ * page cache page, it is returned with an increased refcount.
+ *
+ * Otherwise, %NULL is returned.
+ */
+static inline struct page *find_get_page(struct address_space *mapping,
+					pgoff_t offset)
+{
+	return pagecache_get_page(mapping, offset, 0, 0);
+}
+
+static inline struct page *find_get_page_flags(struct address_space *mapping,
+					pgoff_t offset, int fgp_flags)
+{
+	return pagecache_get_page(mapping, offset, fgp_flags, 0);
+}
+
+/**
+ * find_lock_page - locate, pin and lock a pagecache page
+ * pagecache_get_page - find and get a page reference
+ * @mapping: the address_space to search
+ * @offset: the page index
+ *
+ * Looks up the page cache slot at @mapping & @offset.  If there is a
+ * page cache page, it is returned locked and with an increased
+ * refcount.
+ *
+ * Otherwise, %NULL is returned.
+ *
+ * find_lock_page() may sleep.
+ */
+static inline struct page *find_lock_page(struct address_space *mapping,
+					pgoff_t offset)
+{
+	return pagecache_get_page(mapping, offset, FGP_LOCK, 0);
+}
+
+/**
+ * find_or_create_page - locate or add a pagecache page
+ * @mapping: the page's address_space
+ * @index: the page's index into the mapping
+ * @gfp_mask: page allocation mode
+ *
+ * Looks up the page cache slot at @mapping & @offset.  If there is a
+ * page cache page, it is returned locked and with an increased
+ * refcount.
+ *
+ * If the page is not present, a new page is allocated using @gfp_mask
+ * and added to the page cache and the VM's LRU list.  The page is
+ * returned locked and with an increased refcount.
+ *
+ * On memory exhaustion, %NULL is returned.
+ *
+ * find_or_create_page() may sleep, even if @gfp_flags specifies an
+ * atomic allocation!
+ */
+static inline struct page *find_or_create_page(struct address_space *mapping,
+					pgoff_t offset, gfp_t gfp_mask)
+{
+	return pagecache_get_page(mapping, offset,
+					FGP_LOCK|FGP_ACCESSED|FGP_CREAT,
+					gfp_mask);
+}
+
+/**
+ * grab_cache_page_nowait - returns locked page at given index in given cache
+ * @mapping: target address_space
+ * @index: the page index
+ *
+ * Same as grab_cache_page(), but do not wait if the page is unavailable.
+ * This is intended for speculative data generators, where the data can
+ * be regenerated if the page couldn't be grabbed.  This routine should
+ * be safe to call while holding the lock for another page.
+ *
+ * Clear __GFP_FS when allocating the page to avoid recursion into the fs
+ * and deadlock against the caller's locked page.
+ */
+static inline struct page *grab_cache_page_nowait(struct address_space *mapping,
+				pgoff_t index)
+{
+	return pagecache_get_page(mapping, index,
+			FGP_LOCK|FGP_CREAT|FGP_NOFS|FGP_NOWAIT,
+			mapping_gfp_mask(mapping));
+}
+
+struct page *find_get_entry(struct address_space *mapping, pgoff_t offset);
+struct page *find_lock_entry(struct address_space *mapping, pgoff_t offset);
+unsigned find_get_entries(struct address_space *mapping, pgoff_t start,
+			  unsigned int nr_entries, struct page **entries,
+			  pgoff_t *indices);
 unsigned find_get_pages(struct address_space *mapping, pgoff_t start,
 			unsigned int nr_pages, struct page **pages);
 unsigned find_get_pages_contig(struct address_space *mapping, pgoff_t start,
@@ -268,24 +372,12 @@ static inline struct page *grab_cache_page(struct address_space *mapping,
 	return find_or_create_page(mapping, index, mapping_gfp_mask(mapping));
 }
 
-extern struct page * grab_cache_page_nowait(struct address_space *mapping,
-				pgoff_t index);
-extern struct page * read_cache_page_async(struct address_space *mapping,
-				pgoff_t index, filler_t *filler, void *data);
 extern struct page * read_cache_page(struct address_space *mapping,
 				pgoff_t index, filler_t *filler, void *data);
 extern struct page * read_cache_page_gfp(struct address_space *mapping,
 				pgoff_t index, gfp_t gfp_mask);
 extern int read_cache_pages(struct address_space *mapping,
 		struct list_head *pages, filler_t *filler, void *data);
-
-static inline struct page *read_mapping_page_async(
-				struct address_space *mapping,
-				pgoff_t index, void *data)
-{
-	filler_t *filler = (filler_t *)mapping->a_ops->readpage;
-	return read_cache_page_async(mapping, index, filler, data);
-}
 
 static inline struct page *read_mapping_page(struct address_space *mapping,
 				pgoff_t index, void *data)
@@ -482,56 +574,56 @@ static inline int fault_in_pages_readable(const char __user *uaddr, int size)
  */
 static inline int fault_in_multipages_writeable(char __user *uaddr, int size)
 {
-	int ret = 0;
 	char __user *end = uaddr + size - 1;
 
 	if (unlikely(size == 0))
-		return ret;
+		return 0;
 
+	if (unlikely(uaddr > end))
+		return -EFAULT;
 	/*
 	 * Writing zeroes into userspace here is OK, because we know that if
 	 * the zero gets there, we'll be overwriting it.
 	 */
-	while (uaddr <= end) {
-		ret = __put_user(0, uaddr);
-		if (ret != 0)
-			return ret;
+	do {
+		if (unlikely(__put_user(0, uaddr) != 0))
+			return -EFAULT;
 		uaddr += PAGE_SIZE;
-	}
+	} while (uaddr <= end);
 
 	/* Check whether the range spilled into the next page. */
 	if (((unsigned long)uaddr & PAGE_MASK) ==
 			((unsigned long)end & PAGE_MASK))
-		ret = __put_user(0, end);
+		return __put_user(0, end);
 
-	return ret;
+	return 0;
 }
 
 static inline int fault_in_multipages_readable(const char __user *uaddr,
 					       int size)
 {
 	volatile char c;
-	int ret = 0;
 	const char __user *end = uaddr + size - 1;
 
 	if (unlikely(size == 0))
-		return ret;
+		return 0;
 
-	while (uaddr <= end) {
-		ret = __get_user(c, uaddr);
-		if (ret != 0)
-			return ret;
+	if (unlikely(uaddr > end))
+		return -EFAULT;
+
+	do {
+		if (unlikely(__get_user(c, uaddr) != 0))
+			return -EFAULT;
 		uaddr += PAGE_SIZE;
-	}
+	} while (uaddr <= end);
 
 	/* Check whether the range spilled into the next page. */
 	if (((unsigned long)uaddr & PAGE_MASK) ==
 			((unsigned long)end & PAGE_MASK)) {
-		ret = __get_user(c, end);
-		(void)c;
+		return __get_user(c, end);
 	}
 
-	return ret;
+	return 0;
 }
 
 int add_to_page_cache_locked(struct page *page, struct address_space *mapping,

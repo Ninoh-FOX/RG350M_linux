@@ -120,7 +120,7 @@
 		musb: usb@47400000 {
 			status = "okay";
 
-			control@44e10000 {
+			control@44e10620 {
 				status = "okay";
 			};
 
@@ -134,6 +134,7 @@
 
 			usb@47401000 {
 				status = "okay";
+				dr_mode = "peripheral";
 			};
 
 			usb@47401800 {
@@ -141,7 +142,7 @@
 				dr_mode = "host";
 			};
 
-			dma-controller@07402000  {
+			dma-controller@47402000  {
 				status = "okay";
 			};
 		};

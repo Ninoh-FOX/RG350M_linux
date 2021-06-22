@@ -259,6 +259,8 @@ struct bond_parm_tbl ad_select_tbl[] = {
 
 static int bond_init(struct net_device *bond_dev);
 static void bond_uninit(struct net_device *bond_dev);
+static bool bond_time_in_interval(struct bonding *bond, unsigned long last_act,
+				  int mod);
 
 /*---------------------------- General routines -----------------------------*/
 
@@ -671,6 +673,22 @@ static void bond_set_dev_addr(struct net_device *bond_dev,
 	call_netdevice_notifiers(NETDEV_CHANGEADDR, bond_dev);
 }
 
+static struct slave *bond_get_old_active(struct bonding *bond,
+					 struct slave *new_active)
+{
+	struct slave *slave;
+
+	bond_for_each_slave(bond, slave) {
+		if (slave == new_active)
+			continue;
+
+		if (ether_addr_equal(bond->dev->dev_addr, slave->dev->dev_addr))
+			return slave;
+	}
+
+	return NULL;
+}
+
 /*
  * bond_do_fail_over_mac
  *
@@ -711,6 +729,9 @@ static void bond_do_fail_over_mac(struct bonding *bond,
 
 		write_unlock_bh(&bond->curr_slave_lock);
 		read_unlock(&bond->lock);
+
+		if (!old_active)
+			old_active = bond_get_old_active(bond, new_active);
 
 		if (old_active) {
 			memcpy(tmp_mac, new_active->dev->dev_addr, ETH_ALEN);
@@ -1270,9 +1291,10 @@ int bond_enslave(struct net_device *bond_dev, struct net_device *slave_dev)
 			   bond_dev->name, slave_dev->name);
 	}
 
-	/* already enslaved */
-	if (slave_dev->flags & IFF_SLAVE) {
-		pr_debug("Error, Device was already enslaved\n");
+	/* already in-use? */
+	if (netdev_is_rx_handler_busy(slave_dev)) {
+		netdev_err(bond_dev,
+			   "Error: Device is in use and cannot be enslaved\n");
 		return -EBUSY;
 	}
 
@@ -1917,6 +1939,7 @@ static int  bond_release_and_destroy(struct net_device *bond_dev,
 		bond_dev->priv_flags |= IFF_DISABLE_NETPOLL;
 		pr_info("%s: destroying bond %s.\n",
 			bond_dev->name, bond_dev->name);
+		bond_remove_proc_entry(bond);
 		unregister_netdevice(bond_dev);
 	}
 	return ret;
@@ -2415,6 +2438,7 @@ int bond_arp_rcv(const struct sk_buff *skb, struct bonding *bond,
 		 struct slave *slave)
 {
 	struct arphdr *arp = (struct arphdr *)skb->data;
+	struct slave *curr_active_slave, *curr_arp_slave;
 	unsigned char *arp_ptr;
 	__be32 sip, tip;
 	int alen;
@@ -2459,25 +2483,42 @@ int bond_arp_rcv(const struct sk_buff *skb, struct bonding *bond,
 		 bond->params.arp_validate, slave_do_arp_validate(bond, slave),
 		 &sip, &tip);
 
-	/*
-	 * Backup slaves won't see the ARP reply, but do come through
-	 * here for each ARP probe (so we swap the sip/tip to validate
-	 * the probe).  In a "redundant switch, common router" type of
-	 * configuration, the ARP probe will (hopefully) travel from
-	 * the active, through one switch, the router, then the other
-	 * switch before reaching the backup.
+	curr_active_slave = rcu_dereference(bond->curr_active_slave);
+	curr_arp_slave = rcu_dereference(bond->current_arp_slave);
+
+	/* We 'trust' the received ARP enough to validate it if:
 	 *
-	 * We 'trust' the arp requests if there is an active slave and
-	 * it received valid arp reply(s) after it became active. This
-	 * is done to avoid endless looping when we can't reach the
+	 * (a) the slave receiving the ARP is active (which includes the
+	 * current ARP slave, if any), or
+	 *
+	 * (b) the receiving slave isn't active, but there is a currently
+	 * active slave and it received valid arp reply(s) after it became
+	 * the currently active slave, or
+	 *
+	 * (c) there is an ARP slave that sent an ARP during the prior ARP
+	 * interval, and we receive an ARP reply on any slave.  We accept
+	 * these because switch FDB update delays may deliver the ARP
+	 * reply to a slave other than the sender of the ARP request.
+	 *
+	 * Note: for (b), backup slaves are receiving the broadcast ARP
+	 * request, not a reply.  This request passes from the sending
+	 * slave through the L2 switch(es) to the receiving slave.  Since
+	 * this is checking the request, sip/tip are swapped for
+	 * validation.
+	 *
+	 * This is done to avoid endless looping when we can't reach the
 	 * arp_ip_target and fool ourselves with our own arp requests.
 	 */
 	if (bond_is_active_slave(slave))
 		bond_validate_arp(bond, slave, sip, tip);
-	else if (bond->curr_active_slave &&
-		 time_after(slave_last_rx(bond, bond->curr_active_slave),
-			    bond->curr_active_slave->jiffies))
+	else if (curr_active_slave &&
+		 time_after(slave_last_rx(bond, curr_active_slave),
+			    curr_active_slave->jiffies))
 		bond_validate_arp(bond, slave, tip, sip);
+	else if (curr_arp_slave && (arp->ar_op == htons(ARPOP_REPLY)) &&
+		 bond_time_in_interval(bond,
+				       dev_trans_start(curr_arp_slave->dev), 1))
+		bond_validate_arp(bond, slave, sip, tip);
 
 out_unlock:
 	read_unlock(&bond->lock);
@@ -3395,20 +3436,20 @@ static void bond_set_rx_mode(struct net_device *bond_dev)
 	struct bonding *bond = netdev_priv(bond_dev);
 	struct slave *slave;
 
-	ASSERT_RTNL();
-
+	rcu_read_lock();
 	if (USES_PRIMARY(bond->params.mode)) {
-		slave = rtnl_dereference(bond->curr_active_slave);
+		slave = rcu_dereference(bond->curr_active_slave);
 		if (slave) {
 			dev_uc_sync(slave->dev, bond_dev);
 			dev_mc_sync(slave->dev, bond_dev);
 		}
 	} else {
-		bond_for_each_slave(bond, slave) {
+		bond_for_each_slave_rcu(bond, slave) {
 			dev_uc_sync_multiple(slave->dev, bond_dev);
 			dev_mc_sync_multiple(slave->dev, bond_dev);
 		}
 	}
+	rcu_read_unlock();
 }
 
 static int bond_neigh_init(struct neighbour *n)
@@ -3659,7 +3700,7 @@ void bond_xmit_slave_id(struct bonding *bond, struct sk_buff *skb, int slave_id)
 		}
 	}
 	/* no slave that can tx has been found */
-	kfree_skb(skb);
+	dev_kfree_skb_any(skb);
 }
 
 static int bond_xmit_roundrobin(struct sk_buff *skb, struct net_device *bond_dev)
@@ -3702,7 +3743,7 @@ static int bond_xmit_activebackup(struct sk_buff *skb, struct net_device *bond_d
 	if (slave)
 		bond_dev_queue_xmit(bond, skb, slave->dev);
 	else
-		kfree_skb(skb);
+		dev_kfree_skb_any(skb);
 
 	return NETDEV_TX_OK;
 }
@@ -3746,7 +3787,7 @@ static int bond_xmit_broadcast(struct sk_buff *skb, struct net_device *bond_dev)
 	if (slave && IS_UP(slave->dev) && slave->link == BOND_LINK_UP)
 		bond_dev_queue_xmit(bond, skb, slave->dev);
 	else
-		kfree_skb(skb);
+		dev_kfree_skb_any(skb);
 
 	return NETDEV_TX_OK;
 }
@@ -3851,7 +3892,7 @@ static netdev_tx_t __bond_start_xmit(struct sk_buff *skb, struct net_device *dev
 		pr_err("%s: Error: Unknown bonding mode %d\n",
 		       dev->name, bond->params.mode);
 		WARN_ON_ONCE(1);
-		kfree_skb(skb);
+		dev_kfree_skb_any(skb);
 		return NETDEV_TX_OK;
 	}
 }
@@ -3872,7 +3913,7 @@ static netdev_tx_t bond_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	if (!list_empty(&bond->slave_list))
 		ret = __bond_start_xmit(skb, dev);
 	else
-		kfree_skb(skb);
+		dev_kfree_skb_any(skb);
 	rcu_read_unlock();
 
 	return ret;
@@ -4623,6 +4664,7 @@ static int __init bonding_init(void)
 out:
 	return res;
 err:
+	bond_destroy_debugfs();
 	rtnl_link_unregister(&bond_link_ops);
 err_link:
 	unregister_pernet_subsys(&bond_net_ops);

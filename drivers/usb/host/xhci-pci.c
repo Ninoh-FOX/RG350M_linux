@@ -37,6 +37,13 @@
 
 #define PCI_DEVICE_ID_INTEL_LYNXPOINT_XHCI	0x8c31
 #define PCI_DEVICE_ID_INTEL_LYNXPOINT_LP_XHCI	0x9c31
+#define PCI_DEVICE_ID_INTEL_WILDCATPOINT_LP_XHCI	0x9cb1
+#define PCI_DEVICE_ID_INTEL_CHERRYVIEW_XHCI		0x22b5
+#define PCI_DEVICE_ID_INTEL_SUNRISEPOINT_H_XHCI		0xa12f
+#define PCI_DEVICE_ID_INTEL_SUNRISEPOINT_LP_XHCI	0x9d2f
+#define PCI_DEVICE_ID_INTEL_BROXTON_M_XHCI		0x0aa8
+#define PCI_DEVICE_ID_INTEL_BROXTON_B_XHCI		0x1aa8
+#define PCI_DEVICE_ID_INTEL_APL_XHCI			0x5aa8
 
 static const char hcd_name[] = "xhci_hcd";
 
@@ -101,9 +108,14 @@ static void xhci_pci_quirks(struct device *dev, struct xhci_hcd *xhci)
 	/* AMD PLL quirk */
 	if (pdev->vendor == PCI_VENDOR_ID_AMD && usb_amd_find_chipset_info())
 		xhci->quirks |= XHCI_AMD_PLL_FIX;
+
+	if (pdev->vendor == PCI_VENDOR_ID_AMD)
+		xhci->quirks |= XHCI_TRUST_TX_LENGTH;
+
 	if (pdev->vendor == PCI_VENDOR_ID_INTEL) {
 		xhci->quirks |= XHCI_LPM_SUPPORT;
 		xhci->quirks |= XHCI_INTEL_HOST;
+		xhci->quirks |= XHCI_AVOID_BEI;
 	}
 	if (pdev->vendor == PCI_VENDOR_ID_INTEL &&
 			pdev->device == PCI_DEVICE_ID_INTEL_PANTHERPOINT_XHCI) {
@@ -119,17 +131,27 @@ static void xhci_pci_quirks(struct device *dev, struct xhci_hcd *xhci)
 		 * PPT chipsets.
 		 */
 		xhci->quirks |= XHCI_SPURIOUS_REBOOT;
-		xhci->quirks |= XHCI_AVOID_BEI;
 	}
 	if (pdev->vendor == PCI_VENDOR_ID_INTEL &&
-	    (pdev->device == PCI_DEVICE_ID_INTEL_LYNXPOINT_XHCI ||
-	     pdev->device == PCI_DEVICE_ID_INTEL_LYNXPOINT_LP_XHCI)) {
-		/* Workaround for occasional spurious wakeups from S5 (or
-		 * any other sleep) on Haswell machines with LPT and LPT-LP
-		 * with the new Intel BIOS
-		 */
+		(pdev->device == PCI_DEVICE_ID_INTEL_LYNXPOINT_LP_XHCI ||
+		 pdev->device == PCI_DEVICE_ID_INTEL_WILDCATPOINT_LP_XHCI)) {
+		xhci->quirks |= XHCI_SPURIOUS_REBOOT;
 		xhci->quirks |= XHCI_SPURIOUS_WAKEUP;
 	}
+	if (pdev->vendor == PCI_VENDOR_ID_INTEL &&
+		(pdev->device == PCI_DEVICE_ID_INTEL_SUNRISEPOINT_LP_XHCI ||
+		 pdev->device == PCI_DEVICE_ID_INTEL_SUNRISEPOINT_H_XHCI ||
+		 pdev->device == PCI_DEVICE_ID_INTEL_CHERRYVIEW_XHCI ||
+		 pdev->device == PCI_DEVICE_ID_INTEL_BROXTON_M_XHCI ||
+		 pdev->device == PCI_DEVICE_ID_INTEL_BROXTON_B_XHCI ||
+		 pdev->device == PCI_DEVICE_ID_INTEL_APL_XHCI)) {
+		xhci->quirks |= XHCI_PME_STUCK_QUIRK;
+	}
+	if (pdev->vendor == PCI_VENDOR_ID_INTEL &&
+	    (pdev->device == PCI_DEVICE_ID_INTEL_CHERRYVIEW_XHCI ||
+	     pdev->device == PCI_DEVICE_ID_INTEL_APL_XHCI))
+		xhci->quirks |= XHCI_MISSING_CAS;
+
 	if (pdev->vendor == PCI_VENDOR_ID_ETRON &&
 			pdev->device == PCI_DEVICE_ID_ASROCK_P67) {
 		xhci->quirks |= XHCI_RESET_ON_RESUME;
@@ -137,8 +159,26 @@ static void xhci_pci_quirks(struct device *dev, struct xhci_hcd *xhci)
 				"QUIRK: Resetting on resume");
 		xhci->quirks |= XHCI_TRUST_TX_LENGTH;
 	}
+	if (pdev->vendor == PCI_VENDOR_ID_RENESAS &&
+			pdev->device == 0x0015)
+		xhci->quirks |= XHCI_RESET_ON_RESUME;
 	if (pdev->vendor == PCI_VENDOR_ID_VIA)
 		xhci->quirks |= XHCI_RESET_ON_RESUME;
+}
+
+/*
+ * Make sure PME works on some Intel xHCI controllers by writing 1 to clear
+ * the Internal PME flag bit in vendor specific PMCTRL register at offset 0x80a4
+ */
+static void xhci_pme_quirk(struct xhci_hcd *xhci)
+{
+	u32 val;
+	void __iomem *reg;
+
+	reg = (void __iomem *) xhci->cap_regs + 0x80a4;
+	val = readl(reg);
+	writel(val | BIT(28), reg);
+	readl(reg);
 }
 
 /* called during probe() after chip reset completes */
@@ -180,6 +220,10 @@ static int xhci_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 	struct usb_hcd *hcd;
 
 	driver = (struct hc_driver *)id->driver_data;
+
+	/* Prevent runtime suspending between USB-2 and USB-3 initialization */
+	pm_runtime_get_noresume(&dev->dev);
+
 	/* Register the USB 2.0 roothub.
 	 * FIXME: USB core must know to register the USB 2.0 roothub first.
 	 * This is sort of silly, because we could just set the HCD driver flags
@@ -189,7 +233,7 @@ static int xhci_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 	retval = usb_hcd_pci_probe(dev, id);
 
 	if (retval)
-		return retval;
+		goto put_runtime_pm;
 
 	/* USB 2.0 roothub is stored in the PCI device now. */
 	hcd = dev_get_drvdata(&dev->dev);
@@ -218,12 +262,17 @@ static int xhci_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 	if (xhci->quirks & XHCI_LPM_SUPPORT)
 		hcd_to_bus(xhci->shared_hcd)->root_hub->lpm_capable = 1;
 
+	/* USB-2 and USB-3 roothubs initialized, allow runtime pm suspend */
+	pm_runtime_put_noidle(&dev->dev);
+
 	return 0;
 
 put_usb3_hcd:
 	usb_put_hcd(xhci->shared_hcd);
 dealloc_usb2_hcd:
 	usb_hcd_pci_remove(dev);
+put_runtime_pm:
+	pm_runtime_put_noidle(&dev->dev);
 	return retval;
 }
 
@@ -232,6 +281,7 @@ static void xhci_pci_remove(struct pci_dev *dev)
 	struct xhci_hcd *xhci;
 
 	xhci = hcd_to_xhci(pci_get_drvdata(dev));
+	xhci->xhc_state |= XHCI_STATE_REMOVING;
 	if (xhci->shared_hcd) {
 		usb_remove_hcd(xhci->shared_hcd);
 		usb_put_hcd(xhci->shared_hcd);
@@ -258,7 +308,10 @@ static int xhci_pci_suspend(struct usb_hcd *hcd, bool do_wakeup)
 	if (xhci_compliance_mode_recovery_timer_quirk_check())
 		pdev->no_d3cold = true;
 
-	return xhci_suspend(xhci);
+	if (xhci->quirks & XHCI_PME_STUCK_QUIRK)
+		xhci_pme_quirk(xhci);
+
+	return xhci_suspend(xhci, do_wakeup);
 }
 
 static int xhci_pci_resume(struct usb_hcd *hcd, bool hibernated)
@@ -287,6 +340,9 @@ static int xhci_pci_resume(struct usb_hcd *hcd, bool hibernated)
 
 	if (pdev->vendor == PCI_VENDOR_ID_INTEL)
 		usb_enable_intel_xhci_ports(pdev);
+
+	if (xhci->quirks & XHCI_PME_STUCK_QUIRK)
+		xhci_pme_quirk(xhci);
 
 	retval = xhci_resume(xhci, hibernated);
 	return retval;

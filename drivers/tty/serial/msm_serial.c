@@ -570,7 +570,7 @@ static void msm_set_termios(struct uart_port *port, struct ktermios *termios,
 	port->read_status_mask = 0;
 	if (termios->c_iflag & INPCK)
 		port->read_status_mask |= UART_SR_PAR_FRAME_ERR;
-	if (termios->c_iflag & (BRKINT | PARMRK))
+	if (termios->c_iflag & (IGNBRK | BRKINT | PARMRK))
 		port->read_status_mask |= UART_SR_RX_BREAK;
 
 	uart_update_timeout(port, termios->c_cflag, baud);
@@ -973,6 +973,7 @@ static struct of_device_id msm_match_table[] = {
 	{ .compatible = "qcom,msm-uartdm" },
 	{}
 };
+MODULE_DEVICE_TABLE(of, msm_match_table);
 
 static struct platform_driver msm_platform_driver = {
 	.remove = msm_serial_remove,

@@ -982,10 +982,10 @@ static void build_inv_iotlb_pasid(struct iommu_cmd *cmd, u16 devid, int pasid,
 	address &= ~(0xfffULL);
 
 	cmd->data[0]  = devid;
-	cmd->data[0] |= (pasid & 0xff) << 16;
+	cmd->data[0] |= ((pasid >> 8) & 0xff) << 16;
 	cmd->data[0] |= (qdep  & 0xff) << 24;
 	cmd->data[1]  = devid;
-	cmd->data[1] |= ((pasid >> 8) & 0xfff) << 16;
+	cmd->data[1] |= (pasid & 0xff) << 16;
 	cmd->data[2]  = lower_32_bits(address);
 	cmd->data[2] |= CMD_INV_IOMMU_PAGES_GN_MASK;
 	cmd->data[3]  = upper_32_bits(address);
@@ -1044,7 +1044,7 @@ again:
 	next_tail = (tail + sizeof(*cmd)) % iommu->cmd_buf_size;
 	left      = (head - next_tail) % iommu->cmd_buf_size;
 
-	if (left <= 2) {
+	if (left <= 0x20) {
 		struct iommu_cmd sync_cmd;
 		volatile u64 sem = 0;
 		int ret;
@@ -1376,7 +1376,9 @@ static u64 *alloc_pte(struct protection_domain *domain,
  * This function checks if there is a PTE for a given dma address. If
  * there is one, it returns the pointer to it.
  */
-static u64 *fetch_pte(struct protection_domain *domain, unsigned long address)
+static u64 *fetch_pte(struct protection_domain *domain,
+		      unsigned long address,
+		      unsigned long *page_size)
 {
 	int level;
 	u64 *pte;
@@ -1384,8 +1386,9 @@ static u64 *fetch_pte(struct protection_domain *domain, unsigned long address)
 	if (address > PM_LEVEL_SIZE(domain->mode))
 		return NULL;
 
-	level   =  domain->mode - 1;
-	pte     = &domain->pt_root[PM_LEVEL_INDEX(level, address)];
+	level	   =  domain->mode - 1;
+	pte	   = &domain->pt_root[PM_LEVEL_INDEX(level, address)];
+	*page_size =  PTE_LEVEL_PAGE_SIZE(level);
 
 	while (level > 0) {
 
@@ -1394,19 +1397,9 @@ static u64 *fetch_pte(struct protection_domain *domain, unsigned long address)
 			return NULL;
 
 		/* Large PTE */
-		if (PM_PTE_LEVEL(*pte) == 0x07) {
-			unsigned long pte_mask, __pte;
-
-			/*
-			 * If we have a series of large PTEs, make
-			 * sure to return a pointer to the first one.
-			 */
-			pte_mask = PTE_PAGE_SIZE(*pte);
-			pte_mask = ~((PAGE_SIZE_PTE_COUNT(pte_mask) << 3) - 1);
-			__pte    = ((unsigned long)pte) & pte_mask;
-
-			return (u64 *)__pte;
-		}
+		if (PM_PTE_LEVEL(*pte) == 7 ||
+		    PM_PTE_LEVEL(*pte) == 0)
+			break;
 
 		/* No level skipping support yet */
 		if (PM_PTE_LEVEL(*pte) != level)
@@ -1415,8 +1408,21 @@ static u64 *fetch_pte(struct protection_domain *domain, unsigned long address)
 		level -= 1;
 
 		/* Walk to the next level */
-		pte = IOMMU_PTE_PAGE(*pte);
-		pte = &pte[PM_LEVEL_INDEX(level, address)];
+		pte	   = IOMMU_PTE_PAGE(*pte);
+		pte	   = &pte[PM_LEVEL_INDEX(level, address)];
+		*page_size = PTE_LEVEL_PAGE_SIZE(level);
+	}
+
+	if (PM_PTE_LEVEL(*pte) == 0x07) {
+		unsigned long pte_mask;
+
+		/*
+		 * If we have a series of large PTEs, make
+		 * sure to return a pointer to the first one.
+		 */
+		*page_size = pte_mask = PTE_PAGE_SIZE(*pte);
+		pte_mask   = ~((PAGE_SIZE_PTE_COUNT(pte_mask) << 3) - 1);
+		pte        = (u64 *)(((unsigned long)pte) & pte_mask);
 	}
 
 	return pte;
@@ -1438,19 +1444,20 @@ static int iommu_map_page(struct protection_domain *dom,
 	u64 __pte, *pte;
 	int i, count;
 
+	BUG_ON(!IS_ALIGNED(bus_addr, page_size));
+	BUG_ON(!IS_ALIGNED(phys_addr, page_size));
+
 	if (!(prot & IOMMU_PROT_MASK))
 		return -EINVAL;
 
-	bus_addr  = PAGE_ALIGN(bus_addr);
-	phys_addr = PAGE_ALIGN(phys_addr);
-	count     = PAGE_SIZE_PTE_COUNT(page_size);
-	pte       = alloc_pte(dom, bus_addr, page_size, NULL, GFP_KERNEL);
+	count = PAGE_SIZE_PTE_COUNT(page_size);
+	pte   = alloc_pte(dom, bus_addr, page_size, NULL, GFP_KERNEL);
 
 	for (i = 0; i < count; ++i)
 		if (IOMMU_PTE_PRESENT(pte[i]))
 			return -EBUSY;
 
-	if (page_size > PAGE_SIZE) {
+	if (count > 1) {
 		__pte = PAGE_SIZE_PTE(phys_addr, page_size);
 		__pte |= PM_LEVEL_ENC(7) | IOMMU_PTE_P | IOMMU_PTE_FC;
 	} else
@@ -1473,7 +1480,8 @@ static unsigned long iommu_unmap_page(struct protection_domain *dom,
 				      unsigned long bus_addr,
 				      unsigned long page_size)
 {
-	unsigned long long unmap_size, unmapped;
+	unsigned long long unmapped;
+	unsigned long unmap_size;
 	u64 *pte;
 
 	BUG_ON(!is_power_of_2(page_size));
@@ -1482,28 +1490,12 @@ static unsigned long iommu_unmap_page(struct protection_domain *dom,
 
 	while (unmapped < page_size) {
 
-		pte = fetch_pte(dom, bus_addr);
+		pte = fetch_pte(dom, bus_addr, &unmap_size);
 
-		if (!pte) {
-			/*
-			 * No PTE for this address
-			 * move forward in 4kb steps
-			 */
-			unmap_size = PAGE_SIZE;
-		} else if (PM_PTE_LEVEL(*pte) == 0) {
-			/* 4kb PTE found for this address */
-			unmap_size = PAGE_SIZE;
-			*pte       = 0ULL;
-		} else {
-			int count, i;
+		if (pte) {
+			int i, count;
 
-			/* Large PTE found which maps this address */
-			unmap_size = PTE_PAGE_SIZE(*pte);
-
-			/* Only unmap from the first pte in the page */
-			if ((unmap_size - 1) & bus_addr)
-				break;
-			count      = PAGE_SIZE_PTE_COUNT(unmap_size);
+			count = PAGE_SIZE_PTE_COUNT(unmap_size);
 			for (i = 0; i < count; i++)
 				pte[i] = 0ULL;
 		}
@@ -1651,7 +1643,7 @@ static int alloc_new_range(struct dma_ops_domain *dma_dom,
 {
 	int index = dma_dom->aperture_size >> APERTURE_RANGE_SHIFT;
 	struct amd_iommu *iommu;
-	unsigned long i, old_size;
+	unsigned long i, old_size, pte_pgsize;
 
 #ifdef CONFIG_IOMMU_STRESS
 	populate = false;
@@ -1724,12 +1716,13 @@ static int alloc_new_range(struct dma_ops_domain *dma_dom,
 	 */
 	for (i = dma_dom->aperture[index]->offset;
 	     i < dma_dom->aperture_size;
-	     i += PAGE_SIZE) {
-		u64 *pte = fetch_pte(&dma_dom->domain, i);
+	     i += pte_pgsize) {
+		u64 *pte = fetch_pte(&dma_dom->domain, i, &pte_pgsize);
 		if (!pte || !IOMMU_PTE_PRESENT(*pte))
 			continue;
 
-		dma_ops_reserve_addresses(dma_dom, i >> PAGE_SHIFT, 1);
+		dma_ops_reserve_addresses(dma_dom, i >> PAGE_SHIFT,
+					  pte_pgsize >> 12);
 	}
 
 	update_domain(&dma_dom->domain);
@@ -1757,14 +1750,16 @@ static unsigned long dma_ops_area_alloc(struct device *dev,
 	unsigned long next_bit = dom->next_address % APERTURE_RANGE_SIZE;
 	int max_index = dom->aperture_size >> APERTURE_RANGE_SHIFT;
 	int i = start >> APERTURE_RANGE_SHIFT;
-	unsigned long boundary_size;
+	unsigned long boundary_size, mask;
 	unsigned long address = -1;
 	unsigned long limit;
 
 	next_bit >>= PAGE_SHIFT;
 
-	boundary_size = ALIGN(dma_get_seg_boundary(dev) + 1,
-			PAGE_SIZE) >> PAGE_SHIFT;
+	mask = dma_get_seg_boundary(dev);
+
+	boundary_size = mask + 1 ? ALIGN(mask + 1, PAGE_SIZE) >> PAGE_SHIFT :
+				   1UL << (BITS_PER_LONG - PAGE_SHIFT);
 
 	for (;i < max_index; ++i) {
 		unsigned long offset = dom->aperture[i]->offset >> PAGE_SHIFT;
@@ -1922,7 +1917,13 @@ static void free_pt_##LVL (unsigned long __pt)			\
 	pt = (u64 *)__pt;					\
 								\
 	for (i = 0; i < 512; ++i) {				\
+		/* PTE present? */				\
 		if (!IOMMU_PTE_PRESENT(pt[i]))			\
+			continue;				\
+								\
+		/* Large PTE? */				\
+		if (PM_PTE_LEVEL(pt[i]) == 0 ||			\
+		    PM_PTE_LEVEL(pt[i]) == 7)			\
 			continue;				\
 								\
 		p = (unsigned long)IOMMU_PTE_PAGE(pt[i]);	\
@@ -2030,6 +2031,9 @@ static void dma_ops_domain_free(struct dma_ops_domain *dom)
 		free_page((unsigned long)dom->aperture[i]->bitmap);
 		kfree(dom->aperture[i]);
 	}
+
+	if (dom->domain.id)
+		domain_id_free(dom->domain.id);
 
 	kfree(dom);
 }
@@ -2146,8 +2150,8 @@ static void set_dte_entry(u16 devid, struct protection_domain *domain, bool ats)
 static void clear_dte_entry(u16 devid)
 {
 	/* remove entry from the device table seen by the hardware */
-	amd_iommu_dev_table[devid].data[0] = IOMMU_PTE_P | IOMMU_PTE_TV;
-	amd_iommu_dev_table[devid].data[1] = 0;
+	amd_iommu_dev_table[devid].data[0]  = IOMMU_PTE_P | IOMMU_PTE_TV;
+	amd_iommu_dev_table[devid].data[1] &= DTE_FLAG_MASK;
 
 	amd_iommu_apply_erratum_63(devid);
 }
@@ -2591,8 +2595,16 @@ static void update_device_table(struct protection_domain *domain)
 {
 	struct iommu_dev_data *dev_data;
 
-	list_for_each_entry(dev_data, &domain->dev_list, list)
+	list_for_each_entry(dev_data, &domain->dev_list, list) {
 		set_dte_entry(dev_data->devid, domain, dev_data->ats.enabled);
+
+		if (dev_data->alias_data == NULL)
+			continue;
+
+		/* There is an alias, update device table entry for it */
+		set_dte_entry(dev_data->alias_data->devid, domain,
+			      dev_data->alias_data->ats.enabled);
+	}
 }
 
 static void update_domain(struct protection_domain *domain)
@@ -3227,14 +3239,16 @@ free_domains:
 
 static void cleanup_domain(struct protection_domain *domain)
 {
-	struct iommu_dev_data *dev_data, *next;
+	struct iommu_dev_data *entry;
 	unsigned long flags;
 
 	write_lock_irqsave(&amd_iommu_devtable_lock, flags);
 
-	list_for_each_entry_safe(dev_data, next, &domain->dev_list, list) {
-		__detach_device(dev_data);
-		atomic_set(&dev_data->bind, 0);
+	while (!list_empty(&domain->dev_list)) {
+		entry = list_first_entry(&domain->dev_list,
+					 struct iommu_dev_data, list);
+		__detach_device(entry);
+		atomic_set(&entry->bind, 0);
 	}
 
 	write_unlock_irqrestore(&amd_iommu_devtable_lock, flags);
@@ -3437,27 +3451,21 @@ static phys_addr_t amd_iommu_iova_to_phys(struct iommu_domain *dom,
 					  dma_addr_t iova)
 {
 	struct protection_domain *domain = dom->priv;
-	unsigned long offset_mask;
-	phys_addr_t paddr;
+	unsigned long offset_mask, pte_pgsize;
 	u64 *pte, __pte;
 
 	if (domain->mode == PAGE_MODE_NONE)
 		return iova;
 
-	pte = fetch_pte(domain, iova);
+	pte = fetch_pte(domain, iova, &pte_pgsize);
 
 	if (!pte || !IOMMU_PTE_PRESENT(*pte))
 		return 0;
 
-	if (PM_PTE_LEVEL(*pte) == 0)
-		offset_mask = PAGE_SIZE - 1;
-	else
-		offset_mask = PTE_PAGE_SIZE(*pte) - 1;
+	offset_mask = pte_pgsize - 1;
+	__pte	    = *pte & PM_ADDR_MASK;
 
-	__pte = *pte & PM_ADDR_MASK;
-	paddr = (__pte & ~offset_mask) | (iova & offset_mask);
-
-	return paddr;
+	return (__pte & ~offset_mask) | (iova & offset_mask);
 }
 
 static int amd_iommu_domain_has_cap(struct iommu_domain *domain,
@@ -3999,7 +4007,7 @@ static struct irq_remap_table *get_irq_table(u16 devid, bool ioapic)
 	iommu_flush_dte(iommu, devid);
 	if (devid != alias) {
 		irq_lookup_table[alias] = table;
-		set_dte_irq_entry(devid, table);
+		set_dte_irq_entry(alias, table);
 		iommu_flush_dte(iommu, alias);
 	}
 

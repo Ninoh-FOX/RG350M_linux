@@ -406,10 +406,11 @@ xfs_sb_quota_from_disk(struct xfs_sb *sbp)
 	}
 }
 
-void
-xfs_sb_from_disk(
+static void
+__xfs_sb_from_disk(
 	struct xfs_sb	*to,
-	xfs_dsb_t	*from)
+	xfs_dsb_t	*from,
+	bool		convert_xquota)
 {
 	to->sb_magicnum = be32_to_cpu(from->sb_magicnum);
 	to->sb_blocksize = be32_to_cpu(from->sb_blocksize);
@@ -465,6 +466,17 @@ xfs_sb_from_disk(
 	to->sb_pad = 0;
 	to->sb_pquotino = be64_to_cpu(from->sb_pquotino);
 	to->sb_lsn = be64_to_cpu(from->sb_lsn);
+	/* Convert on-disk flags to in-memory flags? */
+	if (convert_xquota)
+		xfs_sb_quota_from_disk(to);
+}
+
+void
+xfs_sb_from_disk(
+	struct xfs_sb	*to,
+	xfs_dsb_t	*from)
+{
+	__xfs_sb_from_disk(to, from, true);
 }
 
 static inline void
@@ -580,13 +592,18 @@ xfs_sb_verify(
 	struct xfs_mount *mp = bp->b_target->bt_mount;
 	struct xfs_sb	sb;
 
-	xfs_sb_from_disk(&sb, XFS_BUF_TO_SBP(bp));
+	/*
+	 * Use call variant which doesn't convert quota flags from disk
+	 * format, because xfs_mount_validate_sb checks the on-disk flags.
+	 */
+	__xfs_sb_from_disk(&sb, XFS_BUF_TO_SBP(bp), false);
 
 	/*
 	 * Only check the in progress field for the primary superblock as
 	 * mkfs.xfs doesn't clear it from secondary superblocks.
 	 */
-	return xfs_mount_validate_sb(mp, &sb, bp->b_bn == XFS_SB_DADDR,
+	return xfs_mount_validate_sb(mp, &sb,
+				     bp->b_maps[0].bm_bn == XFS_SB_DADDR,
 				     check_version);
 }
 
@@ -596,6 +613,11 @@ xfs_sb_verify(
  * single bit error could clear the feature bit and unused parts of the
  * superblock are supposed to be zero. Hence a non-null crc field indicates that
  * we've potentially lost a feature bit and we should check it anyway.
+ *
+ * However, past bugs (i.e. in growfs) left non-zeroed regions beyond the
+ * last field in V4 secondary superblocks.  So for secondary superblocks,
+ * we are more forgiving, and ignore CRC failures if the primary doesn't
+ * indicate that the fs version is V5.
  */
 static void
 xfs_sb_read_verify(
@@ -616,16 +638,21 @@ xfs_sb_read_verify(
 
 		if (!xfs_verify_cksum(bp->b_addr, be16_to_cpu(dsb->sb_sectsize),
 				      offsetof(struct xfs_sb, sb_crc))) {
-			error = EFSCORRUPTED;
-			goto out_error;
+			/* Only fail bad secondaries on a known V5 filesystem */
+			if (bp->b_bn != XFS_SB_DADDR &&
+			    xfs_sb_version_hascrc(&mp->m_sb)) {
+				error = EFSCORRUPTED;
+				goto out_error;
+			}
 		}
 	}
 	error = xfs_sb_verify(bp, true);
 
 out_error:
 	if (error) {
-		XFS_CORRUPTION_ERROR(__func__, XFS_ERRLEVEL_LOW,
-				     mp, bp->b_addr);
+		if (error != EWRONGFS)
+			XFS_CORRUPTION_ERROR(__func__, XFS_ERRLEVEL_LOW,
+					     mp, bp->b_addr);
 		xfs_buf_ioerror(bp, error);
 	}
 }

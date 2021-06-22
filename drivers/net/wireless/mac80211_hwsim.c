@@ -1932,6 +1932,7 @@ static int hwsim_tx_info_frame_received_nl(struct sk_buff *skb_2,
 	if (!info->attrs[HWSIM_ATTR_ADDR_TRANSMITTER] ||
 	   !info->attrs[HWSIM_ATTR_FLAGS] ||
 	   !info->attrs[HWSIM_ATTR_COOKIE] ||
+	   !info->attrs[HWSIM_ATTR_SIGNAL] ||
 	   !info->attrs[HWSIM_ATTR_TX_INFO])
 		goto out;
 
@@ -2261,7 +2262,7 @@ static int __init init_mac80211_hwsim(void)
 			printk(KERN_DEBUG
 			       "mac80211_hwsim: device_bind_driver failed (%d)\n",
 			       err);
-			goto failed_hw;
+			goto failed_bind;
 		}
 
 		skb_queue_head_init(&data->pending);
@@ -2563,6 +2564,8 @@ failed_mon:
 	return err;
 
 failed_hw:
+	device_release_driver(data->dev);
+failed_bind:
 	device_unregister(data->dev);
 failed_drvdata:
 	ieee80211_free_hw(hw);

@@ -795,6 +795,8 @@ static int message_stats_create(struct mapped_device *md,
 		return -EINVAL;
 
 	if (sscanf(argv[2], "/%u%c", &divisor, &dummy) == 1) {
+		if (!divisor)
+			return -EINVAL;
 		step = end - start;
 		if (do_div(step, divisor))
 			step++;
@@ -964,6 +966,7 @@ int dm_stats_message(struct mapped_device *md, unsigned argc, char **argv,
 
 int __init dm_statistics_init(void)
 {
+	shared_memory_amount = 0;
 	dm_stat_need_rcu_barrier = 0;
 	return 0;
 }

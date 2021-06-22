@@ -61,7 +61,7 @@ extern void move_smb2_info_to_cifs(FILE_ALL_INFO *dst,
 extern int smb2_query_path_info(const unsigned int xid, struct cifs_tcon *tcon,
 				struct cifs_sb_info *cifs_sb,
 				const char *full_path, FILE_ALL_INFO *data,
-				bool *adjust_tz);
+				bool *adjust_tz, bool *symlink);
 extern int smb2_set_path_size(const unsigned int xid, struct cifs_tcon *tcon,
 			      const char *full_path, __u64 size,
 			      struct cifs_sb_info *cifs_sb, bool set_alloc);
@@ -89,6 +89,7 @@ extern int smb2_open_file(const unsigned int xid,
 extern int smb2_unlock_range(struct cifsFileInfo *cfile,
 			     struct file_lock *flock, const unsigned int xid);
 extern int smb2_push_mandatory_locks(struct cifsFileInfo *cfile);
+extern void smb2_reconnect_server(struct work_struct *work);
 
 /*
  * SMB2 Worker functions - most of protocol specific implementation details
@@ -133,6 +134,8 @@ extern int SMB2_query_directory(const unsigned int xid, struct cifs_tcon *tcon,
 extern int SMB2_rename(const unsigned int xid, struct cifs_tcon *tcon,
 		       u64 persistent_fid, u64 volatile_fid,
 		       __le16 *target_file);
+extern int SMB2_rmdir(const unsigned int xid, struct cifs_tcon *tcon,
+		      u64 persistent_fid, u64 volatile_fid);
 extern int SMB2_set_hardlink(const unsigned int xid, struct cifs_tcon *tcon,
 			     u64 persistent_fid, u64 volatile_fid,
 			     __le16 *target_file);
@@ -158,5 +161,6 @@ extern int smb2_lockv(const unsigned int xid, struct cifs_tcon *tcon,
 		      struct smb2_lock_element *buf);
 extern int SMB2_lease_break(const unsigned int xid, struct cifs_tcon *tcon,
 			    __u8 *lease_key, const __le32 lease_state);
+extern int smb3_validate_negotiate(const unsigned int, struct cifs_tcon *);
 
 #endif			/* _SMB2PROTO_H */

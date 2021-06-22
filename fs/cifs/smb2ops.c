@@ -49,9 +49,13 @@ change_conf(struct TCP_Server_Info *server)
 		break;
 	default:
 		server->echoes = true;
-		server->oplocks = true;
+		if (enable_oplocks) {
+			server->oplocks = true;
+			server->oplock_credits = 1;
+		} else
+			server->oplocks = false;
+
 		server->echo_credits = 1;
-		server->oplock_credits = 1;
 	}
 	server->credits -= server->echo_credits + server->oplock_credits;
 	return 0;
@@ -182,11 +186,8 @@ smb2_negotiate_wsize(struct cifs_tcon *tcon, struct smb_vol *volume_info)
 	/* start with specified wsize, or default */
 	wsize = volume_info->wsize ? volume_info->wsize : CIFS_DEFAULT_IOSIZE;
 	wsize = min_t(unsigned int, wsize, server->max_write);
-	/*
-	 * limit write size to 2 ** 16, because we don't support multicredit
-	 * requests now.
-	 */
-	wsize = min_t(unsigned int, wsize, 2 << 15);
+	/* set it to the maximum buffer size value we can send with 1 credit */
+	wsize = min_t(unsigned int, wsize, SMB2_MAX_BUFFER_SIZE);
 
 	return wsize;
 }
@@ -200,11 +201,8 @@ smb2_negotiate_rsize(struct cifs_tcon *tcon, struct smb_vol *volume_info)
 	/* start with specified rsize, or default */
 	rsize = volume_info->rsize ? volume_info->rsize : CIFS_DEFAULT_IOSIZE;
 	rsize = min_t(unsigned int, rsize, server->max_read);
-	/*
-	 * limit write size to 2 ** 16, because we don't support multicredit
-	 * requests now.
-	 */
-	rsize = min_t(unsigned int, rsize, 2 << 15);
+	/* set it to the maximum buffer size value we can send with 1 credit */
+	rsize = min_t(unsigned int, rsize, SMB2_MAX_BUFFER_SIZE);
 
 	return rsize;
 }
@@ -257,7 +255,7 @@ smb2_query_file_info(const unsigned int xid, struct cifs_tcon *tcon,
 	int rc;
 	struct smb2_file_all_info *smb2_data;
 
-	smb2_data = kzalloc(sizeof(struct smb2_file_all_info) + MAX_NAME * 2,
+	smb2_data = kzalloc(sizeof(struct smb2_file_all_info) + PATH_MAX * 2,
 			    GFP_KERNEL);
 	if (smb2_data == NULL)
 		return -ENOMEM;
@@ -597,8 +595,11 @@ smb2_set_lease_key(struct inode *inode, struct cifs_fid *fid)
 static void
 smb2_new_lease_key(struct cifs_fid *fid)
 {
-	get_random_bytes(fid->lease_key, SMB2_LEASE_KEY_SIZE);
+	generate_random_uuid(fid->lease_key);
 }
+
+#define SMB2_SYMLINK_STRUCT_SIZE \
+	(sizeof(struct smb2_err_rsp) - 1 + sizeof(struct smb2_symlink_err_rsp))
 
 static int
 smb2_query_symlink(const unsigned int xid, struct cifs_tcon *tcon,
@@ -612,7 +613,10 @@ smb2_query_symlink(const unsigned int xid, struct cifs_tcon *tcon,
 	struct cifs_fid fid;
 	struct smb2_err_rsp *err_buf = NULL;
 	struct smb2_symlink_err_rsp *symlink;
-	unsigned int sub_len, sub_offset;
+	unsigned int sub_len;
+	unsigned int sub_offset;
+	unsigned int print_len;
+	unsigned int print_offset;
 
 	cifs_dbg(FYI, "%s: path: %s\n", __func__, full_path);
 
@@ -633,11 +637,33 @@ smb2_query_symlink(const unsigned int xid, struct cifs_tcon *tcon,
 		kfree(utf16_path);
 		return -ENOENT;
 	}
+
+	if (le32_to_cpu(err_buf->ByteCount) < sizeof(struct smb2_symlink_err_rsp) ||
+	    get_rfc1002_length(err_buf) + 4 < SMB2_SYMLINK_STRUCT_SIZE) {
+		kfree(utf16_path);
+		return -ENOENT;
+	}
+
 	/* open must fail on symlink - reset rc */
 	rc = 0;
 	symlink = (struct smb2_symlink_err_rsp *)err_buf->ErrorData;
 	sub_len = le16_to_cpu(symlink->SubstituteNameLength);
 	sub_offset = le16_to_cpu(symlink->SubstituteNameOffset);
+	print_len = le16_to_cpu(symlink->PrintNameLength);
+	print_offset = le16_to_cpu(symlink->PrintNameOffset);
+
+	if (get_rfc1002_length(err_buf) + 4 <
+			SMB2_SYMLINK_STRUCT_SIZE + sub_offset + sub_len) {
+		kfree(utf16_path);
+		return -ENOENT;
+	}
+
+	if (get_rfc1002_length(err_buf) + 4 <
+			SMB2_SYMLINK_STRUCT_SIZE + print_offset + print_len) {
+		kfree(utf16_path);
+		return -ENOENT;
+	}
+
 	*target_path = cifs_strndup_from_utf16(
 				(char *)symlink->PathBuffer + sub_offset,
 				sub_len, true, cifs_sb->local_nls);
@@ -649,6 +675,17 @@ smb2_query_symlink(const unsigned int xid, struct cifs_tcon *tcon,
 	cifs_dbg(FYI, "%s: target path: %s\n", __func__, *target_path);
 	kfree(utf16_path);
 	return rc;
+}
+
+static void
+smb2_downgrade_oplock(struct TCP_Server_Info *server,
+			struct cifsInodeInfo *cinode, bool set_level2)
+{
+	if (set_level2)
+		server->ops->set_oplock_level(cinode, SMB2_OPLOCK_LEVEL_II,
+						0, NULL);
+	else
+		server->ops->set_oplock_level(cinode, 0, 0, NULL);
 }
 
 static void
@@ -838,6 +875,12 @@ smb3_parse_lease_buf(void *buf, unsigned int *epoch)
 	return le32_to_cpu(lc->lcontext.LeaseState);
 }
 
+static bool
+smb2_dir_needs_close(struct cifsFileInfo *cfile)
+{
+	return !cfile->invalidHandle;
+}
+
 struct smb_version_operations smb20_operations = {
 	.compare_fids = smb2_compare_fids,
 	.setup_request = smb2_setup_request,
@@ -857,6 +900,7 @@ struct smb_version_operations smb20_operations = {
 	.clear_stats = smb2_clear_stats,
 	.print_stats = smb2_print_stats,
 	.is_oplock_break = smb2_is_valid_oplock_break,
+	.downgrade_oplock = smb2_downgrade_oplock,
 	.need_neg = smb2_need_neg,
 	.negotiate = smb2_negotiate,
 	.negotiate_wsize = smb2_negotiate_wsize,
@@ -907,6 +951,7 @@ struct smb_version_operations smb20_operations = {
 	.set_oplock_level = smb2_set_oplock_level,
 	.create_lease_buf = smb2_create_lease_buf,
 	.parse_lease_buf = smb2_parse_lease_buf,
+	.dir_needs_close = smb2_dir_needs_close,
 };
 
 struct smb_version_operations smb21_operations = {
@@ -928,6 +973,7 @@ struct smb_version_operations smb21_operations = {
 	.clear_stats = smb2_clear_stats,
 	.print_stats = smb2_print_stats,
 	.is_oplock_break = smb2_is_valid_oplock_break,
+	.downgrade_oplock = smb2_downgrade_oplock,
 	.need_neg = smb2_need_neg,
 	.negotiate = smb2_negotiate,
 	.negotiate_wsize = smb2_negotiate_wsize,
@@ -978,6 +1024,7 @@ struct smb_version_operations smb21_operations = {
 	.set_oplock_level = smb21_set_oplock_level,
 	.create_lease_buf = smb2_create_lease_buf,
 	.parse_lease_buf = smb2_parse_lease_buf,
+	.dir_needs_close = smb2_dir_needs_close,
 };
 
 struct smb_version_operations smb30_operations = {
@@ -1000,6 +1047,7 @@ struct smb_version_operations smb30_operations = {
 	.print_stats = smb2_print_stats,
 	.dump_share_caps = smb2_dump_share_caps,
 	.is_oplock_break = smb2_is_valid_oplock_break,
+	.downgrade_oplock = smb2_downgrade_oplock,
 	.need_neg = smb2_need_neg,
 	.negotiate = smb2_negotiate,
 	.negotiate_wsize = smb2_negotiate_wsize,
@@ -1051,6 +1099,8 @@ struct smb_version_operations smb30_operations = {
 	.set_oplock_level = smb3_set_oplock_level,
 	.create_lease_buf = smb3_create_lease_buf,
 	.parse_lease_buf = smb3_parse_lease_buf,
+	.validate_negotiate = smb3_validate_negotiate,
+	.dir_needs_close = smb2_dir_needs_close,
 };
 
 struct smb_version_values smb20_values = {

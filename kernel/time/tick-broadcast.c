@@ -755,6 +755,7 @@ out:
 static void tick_broadcast_clear_oneshot(int cpu)
 {
 	cpumask_clear_cpu(cpu, tick_broadcast_oneshot_mask);
+	cpumask_clear_cpu(cpu, tick_broadcast_pending_mask);
 }
 
 static void tick_broadcast_init_next_event(struct cpumask *mask,
@@ -776,6 +777,9 @@ static void tick_broadcast_init_next_event(struct cpumask *mask,
 void tick_broadcast_setup_oneshot(struct clock_event_device *bc)
 {
 	int cpu = smp_processor_id();
+
+	if (!bc)
+		return;
 
 	/* Set it up only once ! */
 	if (bc->event_handler != tick_handle_oneshot_broadcast) {

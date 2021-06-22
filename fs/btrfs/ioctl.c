@@ -1014,7 +1014,7 @@ out:
 static int cluster_pages_for_defrag(struct inode *inode,
 				    struct page **pages,
 				    unsigned long start_index,
-				    int num_pages)
+				    unsigned long num_pages)
 {
 	unsigned long file_end;
 	u64 isize = i_size_read(inode);
@@ -1172,8 +1172,8 @@ int btrfs_defrag_file(struct inode *inode, struct file *file,
 	int defrag_count = 0;
 	int compress_type = BTRFS_COMPRESS_ZLIB;
 	int extent_thresh = range->extent_thresh;
-	int max_cluster = (256 * 1024) >> PAGE_CACHE_SHIFT;
-	int cluster = max_cluster;
+	unsigned long max_cluster = (256 * 1024) >> PAGE_CACHE_SHIFT;
+	unsigned long cluster = max_cluster;
 	u64 new_align = ~((u64)128 * 1024 - 1);
 	struct page **pages = NULL;
 
@@ -1516,6 +1516,9 @@ static noinline int btrfs_ioctl_snap_create_transid(struct file *file,
 	int namelen;
 	int ret = 0;
 
+	if (!S_ISDIR(file_inode(file)->i_mode))
+		return -ENOTDIR;
+
 	ret = mnt_want_write_file(file);
 	if (ret)
 		goto out;
@@ -1548,6 +1551,12 @@ static noinline int btrfs_ioctl_snap_create_transid(struct file *file,
 			printk(KERN_INFO "btrfs: Snapshot src from "
 			       "another FS\n");
 			ret = -EINVAL;
+		} else if (!inode_owner_or_capable(src_inode)) {
+			/*
+			 * Subvolume creation is not restricted, but snapshots
+			 * are limited to own subvolumes only
+			 */
+			ret = -EPERM;
 		} else {
 			ret = btrfs_mksubvol(&file->f_path, name, namelen,
 					     BTRFS_I(src_inode)->root,
@@ -1566,6 +1575,9 @@ static noinline int btrfs_ioctl_snap_create(struct file *file,
 {
 	struct btrfs_ioctl_vol_args *vol_args;
 	int ret;
+
+	if (!S_ISDIR(file_inode(file)->i_mode))
+		return -ENOTDIR;
 
 	vol_args = memdup_user(arg, sizeof(*vol_args));
 	if (IS_ERR(vol_args))
@@ -1589,6 +1601,9 @@ static noinline int btrfs_ioctl_snap_create_v2(struct file *file,
 	u64 *ptr = NULL;
 	bool readonly = false;
 	struct btrfs_qgroup_inherit *inherit = NULL;
+
+	if (!S_ISDIR(file_inode(file)->i_mode))
+		return -ENOTDIR;
 
 	vol_args = memdup_user(arg, sizeof(*vol_args));
 	if (IS_ERR(vol_args))
@@ -2112,6 +2127,9 @@ static noinline int btrfs_ioctl_snap_destroy(struct file *file,
 	int ret;
 	int err = 0;
 
+	if (!S_ISDIR(dir->i_mode))
+		return -ENOTDIR;
+
 	vol_args = memdup_user(arg, sizeof(*vol_args));
 	if (IS_ERR(vol_args))
 		return PTR_ERR(vol_args);
@@ -2130,7 +2148,7 @@ static noinline int btrfs_ioctl_snap_destroy(struct file *file,
 
 	err = mutex_lock_killable_nested(&dir->i_mutex, I_MUTEX_PARENT);
 	if (err == -EINTR)
-		goto out;
+		goto out_drop_write;
 	dentry = lookup_one_len(vol_args->name, parent, namelen);
 	if (IS_ERR(dentry)) {
 		err = PTR_ERR(dentry);
@@ -2293,6 +2311,7 @@ out_dput:
 	dput(dentry);
 out_unlock_dir:
 	mutex_unlock(&dir->i_mutex);
+out_drop_write:
 	mnt_drop_write_file(file);
 out:
 	kfree(vol_args);
@@ -2664,6 +2683,9 @@ static int btrfs_extent_same(struct inode *src, u64 loff, u64 len,
 	if (src == dst)
 		return -EINVAL;
 
+	if (len == 0)
+		return 0;
+
 	btrfs_double_lock(src, loff, dst, dst_loff, len);
 
 	ret = extent_same_check_offsets(src, loff, len);
@@ -2697,7 +2719,7 @@ static long btrfs_ioctl_file_extent_same(struct file *file,
 					 void __user *argp)
 {
 	struct btrfs_ioctl_same_args tmp;
-	struct btrfs_ioctl_same_args *same;
+	struct btrfs_ioctl_same_args *same = NULL;
 	struct btrfs_ioctl_same_extent_info *info;
 	struct inode *src = file->f_dentry->d_inode;
 	struct file *dst_file = NULL;
@@ -2823,6 +2845,7 @@ next:
 
 out:
 	mnt_drop_write_file(file);
+	kfree(same);
 	return ret;
 }
 
@@ -3203,6 +3226,11 @@ static noinline long btrfs_ioctl_clone(struct file *file, unsigned long srcfd,
 	/* if we extend to eof, continue to block boundary */
 	if (off + len == src->i_size)
 		len = ALIGN(src->i_size, bs) - off;
+
+	if (len == 0) {
+		ret = 0;
+		goto out_unlock;
+	}
 
 	/* verify the end result is block aligned */
 	if (!IS_ALIGNED(off, bs) || !IS_ALIGNED(off + len, bs) ||
@@ -4557,9 +4585,21 @@ long btrfs_ioctl(struct file *file, unsigned int
 		return btrfs_ioctl_logical_to_ino(root, argp);
 	case BTRFS_IOC_SPACE_INFO:
 		return btrfs_ioctl_space_info(root, argp);
-	case BTRFS_IOC_SYNC:
-		btrfs_sync_fs(file->f_dentry->d_sb, 1);
-		return 0;
+	case BTRFS_IOC_SYNC: {
+		int ret;
+
+		ret = btrfs_start_all_delalloc_inodes(root->fs_info, 0);
+		if (ret)
+			return ret;
+		ret = btrfs_sync_fs(file->f_dentry->d_sb, 1);
+		/*
+		 * The transaction thread may want to do more work,
+		 * namely it pokes the cleaner ktread that will start
+		 * processing uncleaned subvols.
+		 */
+		wake_up_process(root->fs_info->transaction_kthread);
+		return ret;
+	}
 	case BTRFS_IOC_START_SYNC:
 		return btrfs_ioctl_start_sync(root, argp);
 	case BTRFS_IOC_WAIT_SYNC:

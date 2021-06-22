@@ -453,8 +453,10 @@ static int mem_check(struct sock *sk)
 	if (room > FL_MAX_SIZE - FL_MAX_PER_SOCK)
 		return 0;
 
+	rcu_read_lock_bh();
 	for_each_sk_fl_rcu(np, sfl)
 		count++;
+	rcu_read_unlock_bh();
 
 	if (room <= 0 ||
 	    ((count >= FL_MAX_PER_SOCK ||
@@ -525,12 +527,13 @@ int ipv6_flowlabel_opt(struct sock *sk, char __user *optval, int optlen)
 	case IPV6_FL_A_PUT:
 		spin_lock_bh(&ip6_sk_fl_lock);
 		for (sflp = &np->ipv6_fl_list;
-		     (sfl = rcu_dereference(*sflp))!=NULL;
+		     (sfl = rcu_dereference_protected(*sflp,
+						      lockdep_is_held(&ip6_sk_fl_lock))) != NULL;
 		     sflp = &sfl->next) {
 			if (sfl->fl->label == freq.flr_label) {
 				if (freq.flr_label == (np->flow_label&IPV6_FLOWLABEL_MASK))
 					np->flow_label &= ~IPV6_FLOWLABEL_MASK;
-				*sflp = rcu_dereference(sfl->next);
+				*sflp = sfl->next;
 				spin_unlock_bh(&ip6_sk_fl_lock);
 				fl_release(sfl->fl);
 				kfree_rcu(sfl, rcu);

@@ -192,6 +192,7 @@ static struct ipv6_devconf ipv6_devconf __read_mostly = {
 #endif
 	.max_addresses		= IPV6_MAX_ADDRESSES,
 	.accept_ra_defrtr	= 1,
+	.accept_ra_min_hop_limit= 1,
 	.accept_ra_pinfo	= 1,
 #ifdef CONFIG_IPV6_ROUTER_PREF
 	.accept_ra_rtr_pref	= 1,
@@ -230,6 +231,7 @@ static struct ipv6_devconf ipv6_devconf_dflt __read_mostly = {
 #endif
 	.max_addresses		= IPV6_MAX_ADDRESSES,
 	.accept_ra_defrtr	= 1,
+	.accept_ra_min_hop_limit= 1,
 	.accept_ra_pinfo	= 1,
 #ifdef CONFIG_IPV6_ROUTER_PREF
 	.accept_ra_rtr_pref	= 1,
@@ -526,7 +528,7 @@ static int inet6_netconf_get_devconf(struct sk_buff *in_skb,
 	if (err < 0)
 		goto errout;
 
-	err = EINVAL;
+	err = -EINVAL;
 	if (!tb[NETCONFA_IFINDEX])
 		goto errout;
 
@@ -1079,8 +1081,11 @@ retry:
 	 * Lifetime is greater than REGEN_ADVANCE time units.  In particular,
 	 * an implementation must not create a temporary address with a zero
 	 * Preferred Lifetime.
+	 * Use age calculation as in addrconf_verify to avoid unnecessary
+	 * temporary addresses being generated.
 	 */
-	if (tmp_prefered_lft <= regen_advance) {
+	age = (now - tmp_tstamp + ADDRCONF_TIMER_FUZZ_MINUS) / HZ;
+	if (tmp_prefered_lft <= regen_advance + age) {
 		in6_ifa_put(ifp);
 		in6_dev_put(idev);
 		ret = -1;
@@ -2638,8 +2643,18 @@ static void init_loopback(struct net_device *dev)
 			if (sp_ifa->flags & (IFA_F_DADFAILED | IFA_F_TENTATIVE))
 				continue;
 
-			if (sp_ifa->rt)
-				continue;
+			if (sp_ifa->rt) {
+				/* This dst has been added to garbage list when
+				 * lo device down, release this obsolete dst and
+				 * reallocate a new router for ifa.
+				 */
+				if (!atomic_read(&sp_ifa->rt->rt6i_ref)) {
+					ip6_rt_put(sp_ifa->rt);
+					sp_ifa->rt = NULL;
+				} else {
+					continue;
+				}
+			}
 
 			sp_rt = addrconf_dst_alloc(idev, &sp_ifa->addr, 0);
 
@@ -3222,6 +3237,22 @@ out:
 	in6_ifa_put(ifp);
 }
 
+/* ifp->idev must be at least read locked */
+static bool ipv6_lonely_lladdr(struct inet6_ifaddr *ifp)
+{
+	struct inet6_ifaddr *ifpiter;
+	struct inet6_dev *idev = ifp->idev;
+
+	list_for_each_entry(ifpiter, &idev->addr_list, if_list) {
+		if (ifp != ifpiter && ifpiter->scope == IFA_LINK &&
+		    (ifpiter->flags & (IFA_F_PERMANENT|IFA_F_TENTATIVE|
+				       IFA_F_OPTIMISTIC|IFA_F_DADFAILED)) ==
+		    IFA_F_PERMANENT)
+			return false;
+	}
+	return true;
+}
+
 static void addrconf_dad_completed(struct inet6_ifaddr *ifp)
 {
 	struct net_device *dev = ifp->idev->dev;
@@ -3241,14 +3272,11 @@ static void addrconf_dad_completed(struct inet6_ifaddr *ifp)
 	 */
 
 	read_lock_bh(&ifp->idev->lock);
-	spin_lock(&ifp->lock);
-	send_mld = ipv6_addr_type(&ifp->addr) & IPV6_ADDR_LINKLOCAL &&
-		   ifp->idev->valid_ll_addr_cnt == 1;
+	send_mld = ifp->scope == IFA_LINK && ipv6_lonely_lladdr(ifp);
 	send_rs = send_mld &&
 		  ipv6_accept_ra(ifp->idev) &&
 		  ifp->idev->cnf.rtr_solicits > 0 &&
 		  (dev->flags&IFF_LOOPBACK) == 0;
-	spin_unlock(&ifp->lock);
 	read_unlock_bh(&ifp->idev->lock);
 
 	/* While dad is in progress mld report's source address is in6_addrany.
@@ -4137,6 +4165,7 @@ static inline void ipv6_store_devconf(struct ipv6_devconf *cnf,
 #endif
 	array[DEVCONF_MAX_ADDRESSES] = cnf->max_addresses;
 	array[DEVCONF_ACCEPT_RA_DEFRTR] = cnf->accept_ra_defrtr;
+	array[DEVCONF_ACCEPT_RA_MIN_HOP_LIMIT] = cnf->accept_ra_min_hop_limit;
 	array[DEVCONF_ACCEPT_RA_PINFO] = cnf->accept_ra_pinfo;
 #ifdef CONFIG_IPV6_ROUTER_PREF
 	array[DEVCONF_ACCEPT_RA_RTR_PREF] = cnf->accept_ra_rtr_pref;
@@ -4542,19 +4571,6 @@ errout:
 		rtnl_set_sk_err(net, RTNLGRP_IPV6_PREFIX, err);
 }
 
-static void update_valid_ll_addr_cnt(struct inet6_ifaddr *ifp, int count)
-{
-	write_lock_bh(&ifp->idev->lock);
-	spin_lock(&ifp->lock);
-	if (((ifp->flags & (IFA_F_PERMANENT|IFA_F_TENTATIVE|IFA_F_OPTIMISTIC|
-			    IFA_F_DADFAILED)) == IFA_F_PERMANENT) &&
-	    (ipv6_addr_type(&ifp->addr) & IPV6_ADDR_LINKLOCAL))
-		ifp->idev->valid_ll_addr_cnt += count;
-	WARN_ON(ifp->idev->valid_ll_addr_cnt < 0);
-	spin_unlock(&ifp->lock);
-	write_unlock_bh(&ifp->idev->lock);
-}
-
 static void __ipv6_ifa_notify(int event, struct inet6_ifaddr *ifp)
 {
 	struct net *net = dev_net(ifp->idev->dev);
@@ -4563,8 +4579,6 @@ static void __ipv6_ifa_notify(int event, struct inet6_ifaddr *ifp)
 
 	switch (event) {
 	case RTM_NEWADDR:
-		update_valid_ll_addr_cnt(ifp, 1);
-
 		/*
 		 * If the address was optimistic
 		 * we inserted the route at the start of
@@ -4580,8 +4594,6 @@ static void __ipv6_ifa_notify(int event, struct inet6_ifaddr *ifp)
 					      ifp->idev->dev, 0, 0);
 		break;
 	case RTM_DELADDR:
-		update_valid_ll_addr_cnt(ifp, -1);
-
 		if (ifp->idev->cnf.forwarding)
 			addrconf_leave_anycast(ifp);
 		addrconf_leave_solict(ifp->idev, &ifp->addr);
@@ -4643,6 +4655,21 @@ int addrconf_sysctl_forward(struct ctl_table *ctl, int write,
 	return ret;
 }
 
+static
+int addrconf_sysctl_mtu(struct ctl_table *ctl, int write,
+			void __user *buffer, size_t *lenp, loff_t *ppos)
+{
+	struct inet6_dev *idev = ctl->extra1;
+	int min_mtu = IPV6_MIN_MTU;
+	struct ctl_table lctl;
+
+	lctl = *ctl;
+	lctl.extra1 = &min_mtu;
+	lctl.extra2 = idev ? &idev->dev->mtu : NULL;
+
+	return proc_dointvec_minmax(&lctl, write, buffer, lenp, ppos);
+}
+
 static void dev_disable_change(struct inet6_dev *idev)
 {
 	struct netdev_notifier_info info;
@@ -4662,8 +4689,7 @@ static void addrconf_disable_change(struct net *net, __s32 newf)
 	struct net_device *dev;
 	struct inet6_dev *idev;
 
-	rcu_read_lock();
-	for_each_netdev_rcu(net, dev) {
+	for_each_netdev(net, dev) {
 		idev = __in6_dev_get(dev);
 		if (idev) {
 			int changed = (!idev->cnf.disable_ipv6) ^ (!newf);
@@ -4672,7 +4698,6 @@ static void addrconf_disable_change(struct net *net, __s32 newf)
 				dev_disable_change(idev);
 		}
 	}
-	rcu_read_unlock();
 }
 
 static int addrconf_disable_ipv6(struct ctl_table *table, int *p, int newf)
@@ -4754,7 +4779,7 @@ static struct addrconf_sysctl_table
 			.data		= &ipv6_devconf.mtu6,
 			.maxlen		= sizeof(int),
 			.mode		= 0644,
-			.proc_handler	= proc_dointvec,
+			.proc_handler	= addrconf_sysctl_mtu,
 		},
 		{
 			.procname	= "accept_ra",
@@ -4875,6 +4900,13 @@ static struct addrconf_sysctl_table
 		{
 			.procname	= "accept_ra_defrtr",
 			.data		= &ipv6_devconf.accept_ra_defrtr,
+			.maxlen		= sizeof(int),
+			.mode		= 0644,
+			.proc_handler	= proc_dointvec,
+		},
+		{
+			.procname	= "accept_ra_min_hop_limit",
+			.data		= &ipv6_devconf.accept_ra_min_hop_limit,
 			.maxlen		= sizeof(int),
 			.mode		= 0644,
 			.proc_handler	= proc_dointvec,

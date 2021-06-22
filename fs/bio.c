@@ -601,7 +601,7 @@ EXPORT_SYMBOL(bio_get_nr_vecs);
 
 static int __bio_add_page(struct request_queue *q, struct bio *bio, struct page
 			  *page, unsigned int len, unsigned int offset,
-			  unsigned short max_sectors)
+			  unsigned int max_sectors)
 {
 	int retried_segments = 0;
 	struct bio_vec *bvec;
@@ -1051,15 +1051,19 @@ int bio_uncopy_user(struct bio *bio)
 	if (!bio_flagged(bio, BIO_NULL_MAPPED)) {
 		/*
 		 * if we're in a workqueue, the request is orphaned, so
-		 * don't copy into a random user address space, just free.
+		 * don't copy into a random user address space, just free
+		 * and return -EINTR so user space doesn't expect any data.
 		 */
 		if (current->mm)
 			ret = __bio_copy_iov(bio, bmd->iovecs, bmd->sgvecs,
 					     bmd->nr_sgvecs, bio_data_dir(bio) == READ,
 					     0, bmd->is_our_pages);
-		else if (bmd->is_our_pages)
-			bio_for_each_segment_all(bvec, bio, i)
-				__free_page(bvec->bv_page);
+		else {
+			ret = -EINTR;
+			if (bmd->is_our_pages)
+				bio_for_each_segment_all(bvec, bio, i)
+					__free_page(bvec->bv_page);
+		}
 	}
 	bio_free_map_data(bmd);
 	bio_put(bio);

@@ -315,6 +315,11 @@ out:
 
 static DEFINE_IDA(rpc_clids);
 
+void rpc_cleanup_clids(void)
+{
+	ida_destroy(&rpc_clids);
+}
+
 static int rpc_alloc_clid(struct rpc_clnt *clnt)
 {
 	int clid;
@@ -656,14 +661,16 @@ EXPORT_SYMBOL_GPL(rpc_shutdown_client);
 /*
  * Free an RPC client
  */
-static void
+static struct rpc_clnt *
 rpc_free_client(struct rpc_clnt *clnt)
 {
+	struct rpc_clnt *parent = NULL;
+
 	dprintk_rcu("RPC:       destroying %s client for %s\n",
 			clnt->cl_program->name,
 			rcu_dereference(clnt->cl_xprt)->servername);
 	if (clnt->cl_parent != clnt)
-		rpc_release_client(clnt->cl_parent);
+		parent = clnt->cl_parent;
 	rpc_clnt_remove_pipedir(clnt);
 	rpc_unregister_client(clnt);
 	rpc_free_iostats(clnt->cl_metrics);
@@ -672,18 +679,17 @@ rpc_free_client(struct rpc_clnt *clnt)
 	rpciod_down();
 	rpc_free_clid(clnt);
 	kfree(clnt);
+	return parent;
 }
 
 /*
  * Free an RPC client
  */
-static void
+static struct rpc_clnt *
 rpc_free_auth(struct rpc_clnt *clnt)
 {
-	if (clnt->cl_auth == NULL) {
-		rpc_free_client(clnt);
-		return;
-	}
+	if (clnt->cl_auth == NULL)
+		return rpc_free_client(clnt);
 
 	/*
 	 * Note: RPCSEC_GSS may need to send NULL RPC calls in order to
@@ -694,7 +700,8 @@ rpc_free_auth(struct rpc_clnt *clnt)
 	rpcauth_release(clnt->cl_auth);
 	clnt->cl_auth = NULL;
 	if (atomic_dec_and_test(&clnt->cl_count))
-		rpc_free_client(clnt);
+		return rpc_free_client(clnt);
+	return NULL;
 }
 
 /*
@@ -705,10 +712,13 @@ rpc_release_client(struct rpc_clnt *clnt)
 {
 	dprintk("RPC:       rpc_release_client(%p)\n", clnt);
 
-	if (list_empty(&clnt->cl_tasks))
-		wake_up(&destroy_wait);
-	if (atomic_dec_and_test(&clnt->cl_count))
-		rpc_free_auth(clnt);
+	do {
+		if (list_empty(&clnt->cl_tasks))
+			wake_up(&destroy_wait);
+		if (!atomic_dec_and_test(&clnt->cl_count))
+			break;
+		clnt = rpc_free_auth(clnt);
+	} while (clnt != NULL);
 }
 EXPORT_SYMBOL_GPL(rpc_release_client);
 
@@ -1428,9 +1438,13 @@ call_refreshresult(struct rpc_task *task)
 	task->tk_action = call_refresh;
 	switch (status) {
 	case 0:
-		if (rpcauth_uptodatecred(task))
+		if (rpcauth_uptodatecred(task)) {
 			task->tk_action = call_allocate;
-		return;
+			return;
+		}
+		/* Use rate-limiting and a max number of retries if refresh
+		 * had status 0 but failed to update the cred.
+		 */
 	case -ETIMEDOUT:
 		rpc_delay(task, 3*HZ);
 	case -EAGAIN:
@@ -1628,10 +1642,12 @@ call_bind_status(struct rpc_task *task)
 		return;
 	case -ECONNREFUSED:		/* connection problems */
 	case -ECONNRESET:
+	case -ECONNABORTED:
 	case -ENOTCONN:
 	case -EHOSTDOWN:
 	case -EHOSTUNREACH:
 	case -ENETUNREACH:
+	case -ENOBUFS:
 	case -EPIPE:
 		dprintk("RPC: %5u remote rpcbind unreachable: %d\n",
 				task->tk_pid, task->tk_status);
@@ -1690,20 +1706,25 @@ call_connect_status(struct rpc_task *task)
 	dprint_status(task);
 
 	trace_rpc_connect_status(task, status);
+	task->tk_status = 0;
 	switch (status) {
-		/* if soft mounted, test if we've timed out */
-	case -ETIMEDOUT:
-		task->tk_action = call_timeout;
-		return;
 	case -ECONNREFUSED:
 	case -ECONNRESET:
+	case -ECONNABORTED:
 	case -ENETUNREACH:
+	case -EHOSTUNREACH:
+	case -ENOBUFS:
+	case -EPIPE:
 		if (RPC_IS_SOFTCONN(task))
 			break;
 		/* retry with existing socket, after a delay */
-	case 0:
+		rpc_delay(task, 3*HZ);
 	case -EAGAIN:
-		task->tk_status = 0;
+		/* Check for timeouts before looping back to call_bind */
+	case -ETIMEDOUT:
+		task->tk_action = call_timeout;
+		return;
+	case 0:
 		clnt->cl_stats->netreconn++;
 		task->tk_action = call_transmit;
 		return;
@@ -1795,7 +1816,9 @@ call_transmit_status(struct rpc_task *task)
 			break;
 		}
 	case -ECONNRESET:
+	case -ECONNABORTED:
 	case -ENOTCONN:
+	case -ENOBUFS:
 	case -EPIPE:
 		rpc_task_force_reencode(task);
 	}
@@ -1904,9 +1927,11 @@ call_status(struct rpc_task *task)
 			xprt_conditional_disconnect(req->rq_xprt,
 					req->rq_connect_cookie);
 		break;
-	case -ECONNRESET:
 	case -ECONNREFUSED:
+	case -ECONNRESET:
+	case -ECONNABORTED:
 		rpc_force_rebind(clnt);
+	case -ENOBUFS:
 		rpc_delay(task, 3*HZ);
 	case -EPIPE:
 	case -ENOTCONN:

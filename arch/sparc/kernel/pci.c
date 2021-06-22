@@ -398,8 +398,8 @@ static void apb_fake_ranges(struct pci_dev *dev,
 	apb_calc_first_last(map, &first, &last);
 	res = bus->resource[1];
 	res->flags = IORESOURCE_MEM;
-	region.start = (first << 21);
-	region.end = (last << 21) + ((1 << 21) - 1);
+	region.start = (first << 29);
+	region.end = (last << 29) + ((1 << 29) - 1);
 	pcibios_bus_to_resource(dev, res, &region);
 }
 
@@ -929,6 +929,23 @@ void pcibios_set_master(struct pci_dev *dev)
 {
 	/* No special bus mastering setup handling */
 }
+
+#ifdef CONFIG_PCI_IOV
+int pcibios_add_device(struct pci_dev *dev)
+{
+	struct pci_dev *pdev;
+
+	/* Add sriov arch specific initialization here.
+	 * Copy dev_archdata from PF to VF
+	 */
+	if (dev->is_virtfn) {
+		pdev = dev->physfn;
+		memcpy(&dev->dev.archdata, &pdev->dev.archdata,
+		       sizeof(struct dev_archdata));
+	}
+	return 0;
+}
+#endif /* CONFIG_PCI_IOV */
 
 static int __init pcibios_init(void)
 {

@@ -588,9 +588,6 @@ tcp_limit_output_bytes - INTEGER
 	typical pfifo_fast qdiscs.
 	tcp_limit_output_bytes limits the number of bytes on qdisc
 	or device to reduce artificial RTT/cwnd and reduce bufferbloat.
-	Note: For GSO/TSO enabled flows, we try to have at least two
-	packets in flight. Reducing tcp_limit_output_bytes might also
-	reduce the size of individual GSO packet (64KB being the max)
 	Default: 131072
 
 tcp_challenge_ack_limit - INTEGER
@@ -1158,6 +1155,14 @@ accept_ra_defrtr - BOOLEAN
 
 	Functional default: enabled if accept_ra is enabled.
 			    disabled if accept_ra is disabled.
+
+accept_ra_min_hop_limit - INTEGER
+	Minimum hop limit Information in Router Advertisement.
+
+	Hop limit Information in Router Advertisement less than this
+	variable shall be ignored.
+
+	Default: 1
 
 accept_ra_pinfo - BOOLEAN
 	Learn Prefix Information in Router Advertisement.

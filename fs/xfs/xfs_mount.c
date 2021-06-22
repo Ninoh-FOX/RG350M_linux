@@ -254,9 +254,9 @@ xfs_initialize_perag(
 		mp->m_flags &= ~XFS_MOUNT_32BITINODES;
 
 	if (mp->m_flags & XFS_MOUNT_32BITINODES)
-		index = xfs_set_inode32(mp);
+		index = xfs_set_inode32(mp, agcount);
 	else
-		index = xfs_set_inode64(mp);
+		index = xfs_set_inode64(mp, agcount);
 
 	if (maxagi)
 		*maxagi = index;
@@ -318,7 +318,6 @@ reread:
 	 * Initialize the mount structure from the superblock.
 	 */
 	xfs_sb_from_disk(&mp->m_sb, XFS_BUF_TO_SBP(bp));
-	xfs_sb_quota_from_disk(&mp->m_sb);
 
 	/*
 	 * We must be able to do sector-sized and sector-aligned IO.

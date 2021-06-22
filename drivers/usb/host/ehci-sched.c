@@ -1384,6 +1384,10 @@ iso_stream_schedule (
 
 	now = ehci_read_frame_index(ehci) & (mod - 1);
 
+	/* If needed, initialize last_iso_frame so that this URB will be seen */
+	if (ehci->isoc_count == 0)
+		ehci->last_iso_frame = now >> 3;
+
 	/* Typical case: reuse current schedule, stream is still active.
 	 * Hopefully there are no gaps from the host falling behind
 	 * (irq delays etc).  If there are, the behavior depends on
@@ -1405,12 +1409,12 @@ iso_stream_schedule (
 		next = (next - base) & (mod - 1);
 		start = (stream->next_uframe - base) & (mod - 1);
 
-		/* Is the schedule already full? */
+		/* Is the schedule about to wrap around? */
 		if (unlikely(start < period)) {
-			ehci_dbg(ehci, "iso sched full %p (%u-%u < %u mod %u)\n",
+			ehci_dbg(ehci, "request %p would overflow (%u-%u < %u mod %u)\n",
 					urb, stream->next_uframe, base,
 					period, mod);
-			status = -ENOSPC;
+			status = -EFBIG;
 			goto fail;
 		}
 
@@ -1493,10 +1497,6 @@ iso_stream_schedule (
 	urb->start_frame = stream->next_uframe;
 	if (!stream->highspeed)
 		urb->start_frame >>= 3;
-
-	/* Make sure scan_isoc() sees these */
-	if (ehci->isoc_count == 0)
-		ehci->last_iso_frame = now >> 3;
 	return 0;
 
  fail:

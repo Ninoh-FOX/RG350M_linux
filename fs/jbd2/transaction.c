@@ -514,11 +514,13 @@ int jbd2_journal_start_reserved(handle_t *handle, unsigned int type,
 	 * similarly constrained call sites
 	 */
 	ret = start_this_handle(journal, handle, GFP_NOFS);
-	if (ret < 0)
+	if (ret < 0) {
 		jbd2_journal_free_reserved(handle);
+		return ret;
+	}
 	handle->h_type = type;
 	handle->h_line_no = line_no;
-	return ret;
+	return 0;
 }
 EXPORT_SYMBOL(jbd2_journal_start_reserved);
 
@@ -549,7 +551,6 @@ int jbd2_journal_extend(handle_t *handle, int nblocks)
 	int result;
 	int wanted;
 
-	WARN_ON(!transaction);
 	if (is_handle_aborted(handle))
 		return -EROFS;
 	journal = transaction->t_journal;
@@ -625,7 +626,6 @@ int jbd2__journal_restart(handle_t *handle, int nblocks, gfp_t gfp_mask)
 	tid_t		tid;
 	int		need_to_start, ret;
 
-	WARN_ON(!transaction);
 	/* If we've had an abort of any type, don't even think about
 	 * actually doing the restart! */
 	if (is_handle_aborted(handle))
@@ -789,7 +789,6 @@ do_get_write_access(handle_t *handle, struct journal_head *jh,
 	int need_copy = 0;
 	unsigned long start_lock, time_lock;
 
-	WARN_ON(!transaction);
 	if (is_handle_aborted(handle))
 		return -EROFS;
 	journal = transaction->t_journal;
@@ -1055,7 +1054,6 @@ int jbd2_journal_get_create_access(handle_t *handle, struct buffer_head *bh)
 	int err;
 
 	jbd_debug(5, "journal_head %p\n", jh);
-	WARN_ON(!transaction);
 	err = -EROFS;
 	if (is_handle_aborted(handle))
 		goto out;
@@ -1269,7 +1267,6 @@ int jbd2_journal_dirty_metadata(handle_t *handle, struct buffer_head *bh)
 	struct journal_head *jh;
 	int ret = 0;
 
-	WARN_ON(!transaction);
 	if (is_handle_aborted(handle))
 		return -EROFS;
 	journal = transaction->t_journal;
@@ -1290,7 +1287,10 @@ int jbd2_journal_dirty_metadata(handle_t *handle, struct buffer_head *bh)
 		 * once a transaction -bzzz
 		 */
 		jh->b_modified = 1;
-		J_ASSERT_JH(jh, handle->h_buffer_credits > 0);
+		if (handle->h_buffer_credits <= 0) {
+			ret = -ENOSPC;
+			goto out_unlock_bh;
+		}
 		handle->h_buffer_credits--;
 	}
 
@@ -1373,7 +1373,6 @@ out_unlock_bh:
 	jbd2_journal_put_journal_head(jh);
 out:
 	JBUFFER_TRACE(jh, "exit");
-	WARN_ON(ret);	/* All errors are bugs, so dump the stack */
 	return ret;
 }
 
@@ -1403,7 +1402,6 @@ int jbd2_journal_forget (handle_t *handle, struct buffer_head *bh)
 	int err = 0;
 	int was_modified = 0;
 
-	WARN_ON(!transaction);
 	if (is_handle_aborted(handle))
 		return -EROFS;
 	journal = transaction->t_journal;
@@ -1534,8 +1532,22 @@ int jbd2_journal_stop(handle_t *handle)
 	tid_t tid;
 	pid_t pid;
 
-	if (!transaction)
-		goto free_and_exit;
+	if (!transaction) {
+		/*
+		 * Handle is already detached from the transaction so
+		 * there is nothing to do other than decrease a refcount,
+		 * or free the handle if refcount drops to zero
+		 */
+		if (--handle->h_ref > 0) {
+			jbd_debug(4, "h_ref %d -> %d\n", handle->h_ref + 1,
+							 handle->h_ref);
+			return err;
+		} else {
+			if (handle->h_rsv_handle)
+				jbd2_free_handle(handle->h_rsv_handle);
+			goto free_and_exit;
+		}
+	}
 	journal = transaction->t_journal;
 
 	J_ASSERT(journal_current_handle() == handle);
@@ -1586,9 +1598,12 @@ int jbd2_journal_stop(handle_t *handle)
 	 * to perform a synchronous write.  We do this to detect the
 	 * case where a single process is doing a stream of sync
 	 * writes.  No point in waiting for joiners in that case.
+	 *
+	 * Setting max_batch_time to 0 disables this completely.
 	 */
 	pid = current->pid;
-	if (handle->h_sync && journal->j_last_sync_writer != pid) {
+	if (handle->h_sync && journal->j_last_sync_writer != pid &&
+	    journal->j_max_batch_time) {
 		u64 commit_time, trans_time;
 
 		journal->j_last_sync_writer = pid;
@@ -1770,7 +1785,9 @@ static void __jbd2_journal_temp_unlink_buffer(struct journal_head *jh)
 
 	__blist_del_buffer(list, jh);
 	jh->b_jlist = BJ_None;
-	if (test_clear_buffer_jbddirty(bh))
+	if (transaction && is_journal_aborted(transaction->t_journal))
+		clear_buffer_jbddirty(bh);
+	else if (test_clear_buffer_jbddirty(bh))
 		mark_buffer_dirty(bh);	/* Expose it to the VM */
 }
 
@@ -2051,6 +2068,7 @@ static int journal_unmap_buffer(journal_t *journal, struct buffer_head *bh,
 
 		if (!buffer_dirty(bh)) {
 			/* bdflush has written it.  We can drop it now */
+			__jbd2_journal_remove_checkpoint(jh);
 			goto zap_buffer;
 		}
 
@@ -2080,6 +2098,7 @@ static int journal_unmap_buffer(journal_t *journal, struct buffer_head *bh,
 				/* The orphan record's transaction has
 				 * committed.  We can cleanse this buffer */
 				clear_buffer_jbddirty(bh);
+				__jbd2_journal_remove_checkpoint(jh);
 				goto zap_buffer;
 			}
 		}
@@ -2374,7 +2393,6 @@ int jbd2_journal_file_inode(handle_t *handle, struct jbd2_inode *jinode)
 	transaction_t *transaction = handle->h_transaction;
 	journal_t *journal;
 
-	WARN_ON(!transaction);
 	if (is_handle_aborted(handle))
 		return -EROFS;
 	journal = transaction->t_journal;

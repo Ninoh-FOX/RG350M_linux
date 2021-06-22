@@ -3423,7 +3423,7 @@ lpfc_scsi_prep_dma_buf_s4(struct lpfc_hba *phba, struct lpfc_scsi_buf *lpfc_cmd)
 		 */
 
 		nseg = scsi_dma_map(scsi_cmnd);
-		if (unlikely(!nseg))
+		if (unlikely(nseg <= 0))
 			return 1;
 		sgl += 1;
 		/* clear the last flag in the fcp_rsp map entry */
@@ -5264,7 +5264,15 @@ lpfc_target_reset_handler(struct scsi_cmnd *cmnd)
 	if (status == FAILED) {
 		lpfc_printf_vlog(vport, KERN_ERR, LOG_FCP,
 			"0722 Target Reset rport failure: rdata x%p\n", rdata);
-		return FAILED;
+		if (pnode) {
+			spin_lock_irq(shost->host_lock);
+			pnode->nlp_flag &= ~NLP_NPR_ADISC;
+			pnode->nlp_fcp_info &= ~NLP_FCP_2_DEVICE;
+			spin_unlock_irq(shost->host_lock);
+		}
+		lpfc_reset_flush_io_context(vport, tgt_id, lun_id,
+					    LPFC_CTX_TGT);
+		return FAST_IO_FAIL;
 	}
 
 	scsi_event.event_type = FC_REG_SCSI_EVENT;

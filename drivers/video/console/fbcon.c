@@ -810,7 +810,7 @@ static int con2fb_release_oldinfo(struct vc_data *vc, struct fb_info *oldinfo,
 		  newinfo in an undefined state. Thus, a call to
 		  fb_set_par() may be needed for the newinfo.
 		*/
-		if (newinfo->fbops->fb_set_par) {
+		if (newinfo && newinfo->fbops->fb_set_par) {
 			ret = newinfo->fbops->fb_set_par(newinfo);
 
 			if (ret)
@@ -1219,6 +1219,8 @@ static void fbcon_free_font(struct display *p, bool freefont)
 	p->userfont = 0;
 }
 
+static void set_vc_hi_font(struct vc_data *vc, bool set);
+
 static void fbcon_deinit(struct vc_data *vc)
 {
 	struct display *p = &fb_display[vc->vc_num];
@@ -1253,6 +1255,9 @@ finished:
 	fbcon_free_font(p, free_font);
 	if (free_font)
 		vc->vc_font.data = NULL;
+
+	if (vc->vc_hi_font_mask)
+		set_vc_hi_font(vc, false);
 
 	if (!con_is_bound(&fb_con))
 		fbcon_exit();
@@ -2489,32 +2494,10 @@ static int fbcon_get_font(struct vc_data *vc, struct console_font *font)
 	return 0;
 }
 
-static int fbcon_do_set_font(struct vc_data *vc, int w, int h,
-			     const u8 * data, int userfont)
+/* set/clear vc_hi_font_mask and update vc attrs accordingly */
+static void set_vc_hi_font(struct vc_data *vc, bool set)
 {
-	struct fb_info *info = registered_fb[con2fb_map[vc->vc_num]];
-	struct fbcon_ops *ops = info->fbcon_par;
-	struct display *p = &fb_display[vc->vc_num];
-	int resize;
-	int cnt;
-	char *old_data = NULL;
-
-	if (CON_IS_VISIBLE(vc) && softback_lines)
-		fbcon_set_origin(vc);
-
-	resize = (w != vc->vc_font.width) || (h != vc->vc_font.height);
-	if (p->userfont)
-		old_data = vc->vc_font.data;
-	if (userfont)
-		cnt = FNTCHARCNT(data);
-	else
-		cnt = 256;
-	vc->vc_font.data = (void *)(p->fontdata = data);
-	if ((p->userfont = userfont))
-		REFCOUNT(data)++;
-	vc->vc_font.width = w;
-	vc->vc_font.height = h;
-	if (vc->vc_hi_font_mask && cnt == 256) {
+	if (!set) {
 		vc->vc_hi_font_mask = 0;
 		if (vc->vc_can_do_color) {
 			vc->vc_complement_mask >>= 1;
@@ -2537,7 +2520,7 @@ static int fbcon_do_set_font(struct vc_data *vc, int w, int h,
 			    ((c & 0xfe00) >> 1) | (c & 0xff);
 			vc->vc_attr >>= 1;
 		}
-	} else if (!vc->vc_hi_font_mask && cnt == 512) {
+	} else {
 		vc->vc_hi_font_mask = 0x100;
 		if (vc->vc_can_do_color) {
 			vc->vc_complement_mask <<= 1;
@@ -2569,8 +2552,38 @@ static int fbcon_do_set_font(struct vc_data *vc, int w, int h,
 			} else
 				vc->vc_video_erase_char = c & ~0x100;
 		}
-
 	}
+}
+
+static int fbcon_do_set_font(struct vc_data *vc, int w, int h,
+			     const u8 * data, int userfont)
+{
+	struct fb_info *info = registered_fb[con2fb_map[vc->vc_num]];
+	struct fbcon_ops *ops = info->fbcon_par;
+	struct display *p = &fb_display[vc->vc_num];
+	int resize;
+	int cnt;
+	char *old_data = NULL;
+
+	if (CON_IS_VISIBLE(vc) && softback_lines)
+		fbcon_set_origin(vc);
+
+	resize = (w != vc->vc_font.width) || (h != vc->vc_font.height);
+	if (p->userfont)
+		old_data = vc->vc_font.data;
+	if (userfont)
+		cnt = FNTCHARCNT(data);
+	else
+		cnt = 256;
+	vc->vc_font.data = (void *)(p->fontdata = data);
+	if ((p->userfont = userfont))
+		REFCOUNT(data)++;
+	vc->vc_font.width = w;
+	vc->vc_font.height = h;
+	if (vc->vc_hi_font_mask && cnt == 256)
+		set_vc_hi_font(vc, false);
+	else if (!vc->vc_hi_font_mask && cnt == 512)
+		set_vc_hi_font(vc, true);
 
 	if (resize) {
 		int cols, rows;
@@ -3079,8 +3092,31 @@ static int fbcon_fb_unbind(int idx)
 			if (con2fb_map[i] == idx)
 				set_con2fb_map(i, new_idx, 0);
 		}
-	} else
+	} else {
+		struct fb_info *info = registered_fb[idx];
+
+		/* This is sort of like set_con2fb_map, except it maps
+		 * the consoles to no device and then releases the
+		 * oldinfo to free memory and cancel the cursor blink
+		 * timer. I can imagine this just becoming part of
+		 * set_con2fb_map where new_idx is -1
+		 */
+		for (i = first_fb_vc; i <= last_fb_vc; i++) {
+			if (con2fb_map[i] == idx) {
+				con2fb_map[i] = -1;
+				if (!search_fb_in_map(idx)) {
+					ret = con2fb_release_oldinfo(vc_cons[i].d,
+								     info, NULL, i,
+								     idx, 0);
+					if (ret) {
+						con2fb_map[i] = idx;
+						return ret;
+					}
+				}
+			}
+		}
 		ret = fbcon_unbind();
+	}
 
 	return ret;
 }

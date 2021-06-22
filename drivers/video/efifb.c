@@ -54,9 +54,9 @@ static int efifb_setcolreg(unsigned regno, unsigned red, unsigned green,
 		return 1;
 
 	if (regno < 16) {
-		red   >>= 8;
-		green >>= 8;
-		blue  >>= 8;
+		red   >>= 16 - info->var.red.length;
+		green >>= 16 - info->var.green.length;
+		blue  >>= 16 - info->var.blue.length;
 		((u32 *)(info->pseudo_palette))[regno] =
 			(red   << info->var.red.offset)   |
 			(green << info->var.green.offset) |
@@ -108,8 +108,8 @@ static int efifb_setup(char *options)
 			if (!*this_opt) continue;
 
 			for (i = 0; i < M_UNKNOWN; i++) {
-				if (!strcmp(this_opt, efifb_dmi_list[i].optname) &&
-				    efifb_dmi_list[i].base != 0) {
+				if (efifb_dmi_list[i].base != 0 &&
+				    !strcmp(this_opt, efifb_dmi_list[i].optname)) {
 					screen_info.lfb_base = efifb_dmi_list[i].base;
 					screen_info.lfb_linelength = efifb_dmi_list[i].stride;
 					screen_info.lfb_width = efifb_dmi_list[i].width;

@@ -120,6 +120,7 @@ tconInfoAlloc(void)
 		++ret_buf->tc_count;
 		INIT_LIST_HEAD(&ret_buf->openFileList);
 		INIT_LIST_HEAD(&ret_buf->tcon_list);
+		spin_lock_init(&ret_buf->open_file_lock);
 #ifdef CONFIG_CIFS_STATS
 		spin_lock_init(&ret_buf->stat_lock);
 #endif
@@ -462,7 +463,7 @@ is_valid_oplock_break(char *buffer, struct TCP_Server_Info *srv)
 				continue;
 
 			cifs_stats_inc(&tcon->stats.cifs_stats.num_oplock_brks);
-			spin_lock(&cifs_file_list_lock);
+			spin_lock(&tcon->open_file_lock);
 			list_for_each(tmp2, &tcon->openFileList) {
 				netfile = list_entry(tmp2, struct cifsFileInfo,
 						     tlist);
@@ -472,17 +473,31 @@ is_valid_oplock_break(char *buffer, struct TCP_Server_Info *srv)
 				cifs_dbg(FYI, "file id match, oplock break\n");
 				pCifsInode = CIFS_I(netfile->dentry->d_inode);
 
-				cifs_set_oplock_level(pCifsInode,
-					pSMB->OplockLevel ? OPLOCK_READ : 0);
+				set_bit(CIFS_INODE_PENDING_OPLOCK_BREAK,
+					&pCifsInode->flags);
+
+				/*
+				 * Set flag if the server downgrades the oplock
+				 * to L2 else clear.
+				 */
+				if (pSMB->OplockLevel)
+					set_bit(
+					   CIFS_INODE_DOWNGRADE_OPLOCK_TO_L2,
+					   &pCifsInode->flags);
+				else
+					clear_bit(
+					   CIFS_INODE_DOWNGRADE_OPLOCK_TO_L2,
+					   &pCifsInode->flags);
+
 				queue_work(cifsiod_wq,
 					   &netfile->oplock_break);
 				netfile->oplock_break_cancelled = false;
 
-				spin_unlock(&cifs_file_list_lock);
+				spin_unlock(&tcon->open_file_lock);
 				spin_unlock(&cifs_tcp_ses_lock);
 				return true;
 			}
-			spin_unlock(&cifs_file_list_lock);
+			spin_unlock(&tcon->open_file_lock);
 			spin_unlock(&cifs_tcp_ses_lock);
 			cifs_dbg(FYI, "No matching file for oplock break\n");
 			return true;
@@ -557,6 +572,62 @@ void cifs_set_oplock_level(struct cifsInodeInfo *cinode, __u32 oplock)
 		cinode->oplock = 0;
 }
 
+static int
+cifs_oplock_break_wait(void *unused)
+{
+	schedule();
+	return signal_pending(current) ? -ERESTARTSYS : 0;
+}
+
+/*
+ * We wait for oplock breaks to be processed before we attempt to perform
+ * writes.
+ */
+int cifs_get_writer(struct cifsInodeInfo *cinode)
+{
+	int rc;
+
+start:
+	rc = wait_on_bit(&cinode->flags, CIFS_INODE_PENDING_OPLOCK_BREAK,
+				   cifs_oplock_break_wait, TASK_KILLABLE);
+	if (rc)
+		return rc;
+
+	spin_lock(&cinode->writers_lock);
+	if (!cinode->writers)
+		set_bit(CIFS_INODE_PENDING_WRITERS, &cinode->flags);
+	cinode->writers++;
+	/* Check to see if we have started servicing an oplock break */
+	if (test_bit(CIFS_INODE_PENDING_OPLOCK_BREAK, &cinode->flags)) {
+		cinode->writers--;
+		if (cinode->writers == 0) {
+			clear_bit(CIFS_INODE_PENDING_WRITERS, &cinode->flags);
+			wake_up_bit(&cinode->flags, CIFS_INODE_PENDING_WRITERS);
+		}
+		spin_unlock(&cinode->writers_lock);
+		goto start;
+	}
+	spin_unlock(&cinode->writers_lock);
+	return 0;
+}
+
+void cifs_put_writer(struct cifsInodeInfo *cinode)
+{
+	spin_lock(&cinode->writers_lock);
+	cinode->writers--;
+	if (cinode->writers == 0) {
+		clear_bit(CIFS_INODE_PENDING_WRITERS, &cinode->flags);
+		wake_up_bit(&cinode->flags, CIFS_INODE_PENDING_WRITERS);
+	}
+	spin_unlock(&cinode->writers_lock);
+}
+
+void cifs_done_oplock_break(struct cifsInodeInfo *cinode)
+{
+	clear_bit(CIFS_INODE_PENDING_OPLOCK_BREAK, &cinode->flags);
+	wake_up_bit(&cinode->flags, CIFS_INODE_PENDING_OPLOCK_BREAK);
+}
+
 bool
 backup_cred(struct cifs_sb_info *cifs_sb)
 {
@@ -575,9 +646,9 @@ backup_cred(struct cifs_sb_info *cifs_sb)
 void
 cifs_del_pending_open(struct cifs_pending_open *open)
 {
-	spin_lock(&cifs_file_list_lock);
+	spin_lock(&tlink_tcon(open->tlink)->open_file_lock);
 	list_del(&open->olist);
-	spin_unlock(&cifs_file_list_lock);
+	spin_unlock(&tlink_tcon(open->tlink)->open_file_lock);
 }
 
 void
@@ -597,7 +668,7 @@ void
 cifs_add_pending_open(struct cifs_fid *fid, struct tcon_link *tlink,
 		      struct cifs_pending_open *open)
 {
-	spin_lock(&cifs_file_list_lock);
+	spin_lock(&tlink_tcon(tlink)->open_file_lock);
 	cifs_add_pending_open_locked(fid, tlink, open);
-	spin_unlock(&cifs_file_list_lock);
+	spin_unlock(&tlink_tcon(open->tlink)->open_file_lock);
 }

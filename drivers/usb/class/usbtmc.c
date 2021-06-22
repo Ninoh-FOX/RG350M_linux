@@ -110,6 +110,7 @@ struct usbtmc_ID_rigol_quirk {
 
 static const struct usbtmc_ID_rigol_quirk usbtmc_id_quirk[] = {
 	{ 0x1ab1, 0x0588 },
+	{ 0x1ab1, 0x04b0 },
 	{ 0, 0 }
 };
 
@@ -121,6 +122,7 @@ static void usbtmc_delete(struct kref *kref)
 	struct usbtmc_device_data *data = to_usbtmc_data(kref);
 
 	usb_put_dev(data->usb_dev);
+	kfree(data);
 }
 
 static int usbtmc_open(struct inode *inode, struct file *filp)
@@ -1100,7 +1102,7 @@ static int usbtmc_probe(struct usb_interface *intf,
 
 	dev_dbg(&intf->dev, "%s called\n", __func__);
 
-	data = devm_kzalloc(&intf->dev, sizeof(*data), GFP_KERNEL);
+	data = kzalloc(sizeof(*data), GFP_KERNEL);
 	if (!data) {
 		dev_err(&intf->dev, "Unable to allocate kernel memory\n");
 		return -ENOMEM;
@@ -1160,6 +1162,12 @@ static int usbtmc_probe(struct usb_interface *intf,
 		}
 	}
 
+	if (!data->bulk_out || !data->bulk_in) {
+		dev_err(&intf->dev, "bulk endpoints not found\n");
+		retcode = -ENODEV;
+		goto err_put;
+	}
+
 	retcode = get_capabilities(data);
 	if (retcode)
 		dev_err(&intf->dev, "can't read capabilities\n");
@@ -1183,6 +1191,7 @@ static int usbtmc_probe(struct usb_interface *intf,
 error_register:
 	sysfs_remove_group(&intf->dev.kobj, &capability_attr_grp);
 	sysfs_remove_group(&intf->dev.kobj, &data_attr_grp);
+err_put:
 	kref_put(&data->kref, usbtmc_delete);
 	return retcode;
 }

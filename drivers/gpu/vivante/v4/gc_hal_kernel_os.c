@@ -6468,7 +6468,7 @@ gckOS_Signal(
     else
     {
         /* Set the event to an unsignaled state. */
-        INIT_COMPLETION(signal->obj);
+        init_completion(&signal->obj);
     }
 
     /* Success. */

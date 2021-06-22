@@ -1078,6 +1078,7 @@ static void srpt_unmap_sg_to_ib_sge(struct srpt_rdma_ch *ch,
 static int srpt_map_sg_to_ib_sge(struct srpt_rdma_ch *ch,
 				 struct srpt_send_ioctx *ioctx)
 {
+	struct ib_device *dev = ch->sport->sdev->device;
 	struct se_cmd *cmd;
 	struct scatterlist *sg, *sg_orig;
 	int sg_cnt;
@@ -1124,7 +1125,7 @@ static int srpt_map_sg_to_ib_sge(struct srpt_rdma_ch *ch,
 
 	db = ioctx->rbufs;
 	tsize = cmd->data_length;
-	dma_len = sg_dma_len(&sg[0]);
+	dma_len = ib_sg_dma_len(dev, &sg[0]);
 	riu = ioctx->rdma_ius;
 
 	/*
@@ -1155,7 +1156,8 @@ static int srpt_map_sg_to_ib_sge(struct srpt_rdma_ch *ch,
 					++j;
 					if (j < count) {
 						sg = sg_next(sg);
-						dma_len = sg_dma_len(sg);
+						dma_len = ib_sg_dma_len(
+								dev, sg);
 					}
 				}
 			} else {
@@ -1192,8 +1194,8 @@ static int srpt_map_sg_to_ib_sge(struct srpt_rdma_ch *ch,
 	tsize = cmd->data_length;
 	riu = ioctx->rdma_ius;
 	sg = sg_orig;
-	dma_len = sg_dma_len(&sg[0]);
-	dma_addr = sg_dma_address(&sg[0]);
+	dma_len = ib_sg_dma_len(dev, &sg[0]);
+	dma_addr = ib_sg_dma_address(dev, &sg[0]);
 
 	/* this second loop is really mapped sg_addres to rdma_iu->ib_sge */
 	for (i = 0, j = 0;
@@ -1216,8 +1218,10 @@ static int srpt_map_sg_to_ib_sge(struct srpt_rdma_ch *ch,
 					++j;
 					if (j < count) {
 						sg = sg_next(sg);
-						dma_len = sg_dma_len(sg);
-						dma_addr = sg_dma_address(sg);
+						dma_len = ib_sg_dma_len(
+								dev, sg);
+						dma_addr = ib_sg_dma_address(
+								dev, sg);
 					}
 				}
 			} else {
@@ -1750,47 +1754,6 @@ send_sense:
 	return -1;
 }
 
-/**
- * srpt_rx_mgmt_fn_tag() - Process a task management function by tag.
- * @ch: RDMA channel of the task management request.
- * @fn: Task management function to perform.
- * @req_tag: Tag of the SRP task management request.
- * @mgmt_ioctx: I/O context of the task management request.
- *
- * Returns zero if the target core will process the task management
- * request asynchronously.
- *
- * Note: It is assumed that the initiator serializes tag-based task management
- * requests.
- */
-static int srpt_rx_mgmt_fn_tag(struct srpt_send_ioctx *ioctx, u64 tag)
-{
-	struct srpt_device *sdev;
-	struct srpt_rdma_ch *ch;
-	struct srpt_send_ioctx *target;
-	int ret, i;
-
-	ret = -EINVAL;
-	ch = ioctx->ch;
-	BUG_ON(!ch);
-	BUG_ON(!ch->sport);
-	sdev = ch->sport->sdev;
-	BUG_ON(!sdev);
-	spin_lock_irq(&sdev->spinlock);
-	for (i = 0; i < ch->rq_size; ++i) {
-		target = ch->ioctx_ring[i];
-		if (target->cmd.se_lun == ioctx->cmd.se_lun &&
-		    target->tag == tag &&
-		    srpt_get_cmd_state(target) != SRPT_STATE_DONE) {
-			ret = 0;
-			/* now let the target core abort &target->cmd; */
-			break;
-		}
-	}
-	spin_unlock_irq(&sdev->spinlock);
-	return ret;
-}
-
 static int srp_tmr_to_tcm(int fn)
 {
 	switch (fn) {
@@ -1825,7 +1788,6 @@ static void srpt_handle_tsk_mgmt(struct srpt_rdma_ch *ch,
 	struct se_cmd *cmd;
 	struct se_session *sess = ch->sess;
 	uint64_t unpacked_lun;
-	uint32_t tag = 0;
 	int tcm_tmr;
 	int rc;
 
@@ -1841,25 +1803,10 @@ static void srpt_handle_tsk_mgmt(struct srpt_rdma_ch *ch,
 	srpt_set_cmd_state(send_ioctx, SRPT_STATE_MGMT);
 	send_ioctx->tag = srp_tsk->tag;
 	tcm_tmr = srp_tmr_to_tcm(srp_tsk->tsk_mgmt_func);
-	if (tcm_tmr < 0) {
-		send_ioctx->cmd.se_tmr_req->response =
-			TMR_TASK_MGMT_FUNCTION_NOT_SUPPORTED;
-		goto fail;
-	}
 	unpacked_lun = srpt_unpack_lun((uint8_t *)&srp_tsk->lun,
 				       sizeof(srp_tsk->lun));
-
-	if (srp_tsk->tsk_mgmt_func == SRP_TSK_ABORT_TASK) {
-		rc = srpt_rx_mgmt_fn_tag(send_ioctx, srp_tsk->task_tag);
-		if (rc < 0) {
-			send_ioctx->cmd.se_tmr_req->response =
-					TMR_TASK_DOES_NOT_EXIST;
-			goto fail;
-		}
-		tag = srp_tsk->task_tag;
-	}
 	rc = target_submit_tmr(&send_ioctx->cmd, sess, NULL, unpacked_lun,
-				srp_tsk, tcm_tmr, GFP_KERNEL, tag,
+				srp_tsk, tcm_tmr, GFP_KERNEL, srp_tsk->task_tag,
 				TARGET_SCF_ACK_KREF);
 	if (rc != 0) {
 		send_ioctx->cmd.se_tmr_req->response = TMR_FUNCTION_REJECTED;
@@ -2097,6 +2044,7 @@ static int srpt_create_ch_ib(struct srpt_rdma_ch *ch)
 	if (!qp_init)
 		goto out;
 
+retry:
 	ch->cq = ib_create_cq(sdev->device, srpt_completion, NULL, ch,
 			      ch->rq_size + srp_sq_size, 0);
 	if (IS_ERR(ch->cq)) {
@@ -2120,6 +2068,13 @@ static int srpt_create_ch_ib(struct srpt_rdma_ch *ch)
 	ch->qp = ib_create_qp(sdev->pd, qp_init);
 	if (IS_ERR(ch->qp)) {
 		ret = PTR_ERR(ch->qp);
+		if (ret == -ENOMEM) {
+			srp_sq_size /= 2;
+			if (srp_sq_size >= MIN_SRPT_SQ_SIZE) {
+				ib_destroy_cq(ch->cq);
+				goto retry;
+			}
+		}
 		printk(KERN_ERR "failed to create_qp ret= %d\n", ret);
 		goto err_destroy_cq;
 	}

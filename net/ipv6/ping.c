@@ -57,7 +57,8 @@ static struct inet_protosw pingv6_protosw = {
 
 
 /* Compatibility glue so we can support IPv6 when it's compiled as a module */
-static int dummy_ipv6_recv_error(struct sock *sk, struct msghdr *msg, int len)
+static int dummy_ipv6_recv_error(struct sock *sk, struct msghdr *msg, int len,
+				 int *addr_len)
 {
 	return -EAFNOSUPPORT;
 }
@@ -103,9 +104,10 @@ int ping_v6_sendmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
 
 	if (msg->msg_name) {
 		struct sockaddr_in6 *u = (struct sockaddr_in6 *) msg->msg_name;
-		if (msg->msg_namelen < sizeof(struct sockaddr_in6) ||
-		    u->sin6_family != AF_INET6) {
+		if (msg->msg_namelen < sizeof(*u))
 			return -EINVAL;
+		if (u->sin6_family != AF_INET6) {
+			return -EAFNOSUPPORT;
 		}
 		if (sk->sk_bound_dev_if &&
 		    sk->sk_bound_dev_if != u->sin6_scope_id) {
@@ -150,8 +152,10 @@ int ping_v6_sendmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
 	rt = (struct rt6_info *) dst;
 
 	np = inet6_sk(sk);
-	if (!np)
-		return -EBADF;
+	if (!np) {
+		err = -EBADF;
+		goto dst_err_out;
+	}
 
 	if (!fl6.flowi6_oif && ipv6_addr_is_multicast(&fl6.daddr))
 		fl6.flowi6_oif = np->mcast_oif;
@@ -181,8 +185,8 @@ int ping_v6_sendmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
 			      MSG_DONTWAIT, np->dontfrag);
 
 	if (err) {
-		ICMP6_INC_STATS_BH(sock_net(sk), rt->rt6i_idev,
-				   ICMP6_MIB_OUTERRORS);
+		ICMP6_INC_STATS(sock_net(sk), rt->rt6i_idev,
+				ICMP6_MIB_OUTERRORS);
 		ip6_flush_pending_frames(sk);
 	} else {
 		err = icmpv6_push_pending_frames(sk, &fl6,
@@ -190,6 +194,9 @@ int ping_v6_sendmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
 						 len);
 	}
 	release_sock(sk);
+
+dst_err_out:
+	dst_release(dst);
 
 	if (err)
 		return err;

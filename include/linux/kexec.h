@@ -26,6 +26,10 @@
 #error KEXEC_CONTROL_MEMORY_LIMIT not defined
 #endif
 
+#ifndef KEXEC_CONTROL_MEMORY_GFP
+#define KEXEC_CONTROL_MEMORY_GFP GFP_KERNEL
+#endif
+
 #ifndef KEXEC_CONTROL_PAGE_SIZE
 #error KEXEC_CONTROL_PAGE_SIZE not defined
 #endif
@@ -197,6 +201,9 @@ extern note_buf_t __percpu *crash_notes;
 extern u32 vmcoreinfo_note[VMCOREINFO_NOTE_SIZE/4];
 extern size_t vmcoreinfo_size;
 extern size_t vmcoreinfo_max_size;
+
+/* flag to track if kexec reboot is in progress */
+extern bool kexec_in_progress;
 
 int __init parse_crashkernel(char *cmdline, unsigned long long system_ram,
 		unsigned long long *crash_size, unsigned long long *crash_base);

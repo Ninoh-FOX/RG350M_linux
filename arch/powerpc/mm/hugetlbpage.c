@@ -86,11 +86,6 @@ int pgd_huge(pgd_t pgd)
 	 */
 	return ((pgd_val(pgd) & 0x3) != 0x0);
 }
-
-int pmd_huge_support(void)
-{
-	return 1;
-}
 #else
 int pmd_huge(pmd_t pmd)
 {
@@ -103,11 +98,6 @@ int pud_huge(pud_t pud)
 }
 
 int pgd_huge(pgd_t pgd)
-{
-	return 0;
-}
-
-int pmd_huge_support(void)
 {
 	return 0;
 }
@@ -711,6 +701,14 @@ follow_huge_addr(struct mm_struct *mm, unsigned long address, int write)
 struct page *
 follow_huge_pmd(struct mm_struct *mm, unsigned long address,
 		pmd_t *pmd, int write)
+{
+	BUG();
+	return NULL;
+}
+
+struct page *
+follow_huge_pud(struct mm_struct *mm, unsigned long address,
+		pud_t *pud, int write)
 {
 	BUG();
 	return NULL;

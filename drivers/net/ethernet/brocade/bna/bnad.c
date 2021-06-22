@@ -193,6 +193,7 @@ bnad_txcmpl_process(struct bnad *bnad, struct bna_tcb *tcb)
 		return 0;
 
 	hw_cons = *(tcb->hw_consumer_index);
+	rmb();
 	cons = tcb->consumer_index;
 	q_depth = tcb->q_depth;
 
@@ -2906,13 +2907,12 @@ bnad_start_xmit(struct sk_buff *skb, struct net_device *netdev)
 	BNA_QE_INDX_INC(prod, q_depth);
 	tcb->producer_index = prod;
 
-	smp_mb();
+	wmb();
 
 	if (unlikely(!test_bit(BNAD_TXQ_TX_STARTED, &tcb->flags)))
 		return NETDEV_TX_OK;
 
 	bna_txq_prod_indx_doorbell(tcb);
-	smp_mb();
 
 	return NETDEV_TX_OK;
 }
@@ -3300,17 +3300,12 @@ bnad_pci_init(struct bnad *bnad,
 	err = pci_request_regions(pdev, BNAD_NAME);
 	if (err)
 		goto disable_device;
-	if (!dma_set_mask(&pdev->dev, DMA_BIT_MASK(64)) &&
-	    !dma_set_coherent_mask(&pdev->dev, DMA_BIT_MASK(64))) {
+	if (!dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64))) {
 		*using_dac = true;
 	} else {
-		err = dma_set_mask(&pdev->dev, DMA_BIT_MASK(32));
-		if (err) {
-			err = dma_set_coherent_mask(&pdev->dev,
-						    DMA_BIT_MASK(32));
-			if (err)
-				goto release_regions;
-		}
+		err = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
+		if (err)
+			goto release_regions;
 		*using_dac = false;
 	}
 	pci_set_master(pdev);

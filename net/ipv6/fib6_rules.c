@@ -104,6 +104,7 @@ static int fib6_rule_action(struct fib_rule *rule, struct flowi *flp,
 				goto again;
 			flp6->saddr = saddr;
 		}
+		err = rt->dst.error;
 		goto out;
 	}
 again:
@@ -122,7 +123,11 @@ out:
 static bool fib6_rule_suppress(struct fib_rule *rule, struct fib_lookup_arg *arg)
 {
 	struct rt6_info *rt = (struct rt6_info *) arg->result;
-	struct net_device *dev = rt->rt6i_idev->dev;
+	struct net_device *dev = NULL;
+
+	if (rt->rt6i_idev)
+		dev = rt->rt6i_idev->dev;
+
 	/* do not accept result if the route does
 	 * not meet the required prefix length
 	 */

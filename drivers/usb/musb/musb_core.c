@@ -100,6 +100,7 @@
 #include <linux/platform_device.h>
 #include <linux/io.h>
 #include <linux/dma-mapping.h>
+#include <linux/usb.h>
 
 #include "musb_core.h"
 
@@ -132,7 +133,7 @@ static inline struct musb *dev_to_musb(struct device *dev)
 /*-------------------------------------------------------------------------*/
 
 #ifndef CONFIG_BLACKFIN
-static int musb_ulpi_read(struct usb_phy *phy, u32 offset)
+static int musb_ulpi_read(struct usb_phy *phy, u32 reg)
 {
 	void __iomem *addr = phy->io_priv;
 	int	i = 0;
@@ -151,7 +152,7 @@ static int musb_ulpi_read(struct usb_phy *phy, u32 offset)
 	 * ULPICarKitControlDisableUTMI after clearing POWER_SUSPENDM.
 	 */
 
-	musb_writeb(addr, MUSB_ULPI_REG_ADDR, (u8)offset);
+	musb_writeb(addr, MUSB_ULPI_REG_ADDR, (u8)reg);
 	musb_writeb(addr, MUSB_ULPI_REG_CONTROL,
 			MUSB_ULPI_REG_REQ | MUSB_ULPI_RDN_WR);
 
@@ -176,7 +177,7 @@ out:
 	return ret;
 }
 
-static int musb_ulpi_write(struct usb_phy *phy, u32 offset, u32 data)
+static int musb_ulpi_write(struct usb_phy *phy, u32 val, u32 reg)
 {
 	void __iomem *addr = phy->io_priv;
 	int	i = 0;
@@ -191,8 +192,8 @@ static int musb_ulpi_write(struct usb_phy *phy, u32 offset, u32 data)
 	power &= ~MUSB_POWER_SUSPENDM;
 	musb_writeb(addr, MUSB_POWER, power);
 
-	musb_writeb(addr, MUSB_ULPI_REG_ADDR, (u8)offset);
-	musb_writeb(addr, MUSB_ULPI_REG_DATA, (u8)data);
+	musb_writeb(addr, MUSB_ULPI_REG_ADDR, (u8)reg);
+	musb_writeb(addr, MUSB_ULPI_REG_DATA, (u8)val);
 	musb_writeb(addr, MUSB_ULPI_REG_CONTROL, MUSB_ULPI_REG_REQ);
 
 	while (!(musb_readb(addr, MUSB_ULPI_REG_CONTROL)
@@ -439,7 +440,6 @@ void musb_hnp_stop(struct musb *musb)
 static irqreturn_t musb_stage0_irq(struct musb *musb, u8 int_usb,
 				u8 devctl)
 {
-	struct usb_otg *otg = musb->xceiv->otg;
 	irqreturn_t handled = IRQ_NONE;
 
 	dev_dbg(musb->controller, "<== DevCtl=%02x, int_usb=0x%x\n", devctl,
@@ -479,7 +479,7 @@ static irqreturn_t musb_stage0_irq(struct musb *musb, u8 int_usb,
 						(USB_PORT_STAT_C_SUSPEND << 16)
 						| MUSB_PORT_STAT_RESUME;
 				musb->rh_timer = jiffies
-						+ msecs_to_jiffies(20);
+					+ msecs_to_jiffies(USB_RESUME_TIMEOUT);
 
 				musb->xceiv->state = OTG_STATE_A_HOST;
 				musb->is_active = 1;
@@ -654,7 +654,7 @@ static irqreturn_t musb_stage0_irq(struct musb *musb, u8 int_usb,
 				break;
 		case OTG_STATE_B_PERIPHERAL:
 			musb_g_suspend(musb);
-			musb->is_active = otg->gadget->b_hnp_enable;
+			musb->is_active = musb->g.b_hnp_enable;
 			if (musb->is_active) {
 				musb->xceiv->state = OTG_STATE_B_WAIT_ACON;
 				dev_dbg(musb->controller, "HNP: Setting timer for b_ase0_brst\n");
@@ -670,7 +670,7 @@ static irqreturn_t musb_stage0_irq(struct musb *musb, u8 int_usb,
 			break;
 		case OTG_STATE_A_HOST:
 			musb->xceiv->state = OTG_STATE_A_SUSPEND;
-			musb->is_active = otg->host->b_hnp_enable;
+			musb->is_active = musb->hcd->self.b_hnp_enable;
 			break;
 		case OTG_STATE_B_HOST:
 			/* Transition to B_PERIPHERAL, see 6.8.2.6 p 44 */
@@ -1809,8 +1809,6 @@ static void musb_free(struct musb *musb)
 			disable_irq_wake(musb->nIrq);
 		free_irq(musb->nIrq, musb);
 	}
-	if (musb->dma_controller)
-		dma_controller_destroy(musb->dma_controller);
 
 	musb_host_free(musb);
 }
@@ -1846,15 +1844,17 @@ musb_init_controller(struct device *dev, int nIrq, void __iomem *ctrl)
 		goto fail0;
 	}
 
-	pm_runtime_use_autosuspend(musb->controller);
-	pm_runtime_set_autosuspend_delay(musb->controller, 200);
-	pm_runtime_enable(musb->controller);
-
 	spin_lock_init(&musb->lock);
 	musb->board_set_power = plat->set_power;
 	musb->min_power = plat->min_power;
 	musb->ops = plat->platform_ops;
 	musb->port_mode = plat->mode;
+
+	/* We need musb_read/write functions initialized for PM */
+	pm_runtime_use_autosuspend(musb->controller);
+	pm_runtime_set_autosuspend_delay(musb->controller, 200);
+	pm_runtime_irq_safe(musb->controller);
+	pm_runtime_enable(musb->controller);
 
 	/* The musb_platform_init() call:
 	 *   - adjusts musb->mregs
@@ -1892,6 +1892,9 @@ musb_init_controller(struct device *dev, int nIrq, void __iomem *ctrl)
 	musb_platform_disable(musb);
 	musb_generic_disable(musb);
 
+	/* Init IRQ workqueue before request_irq */
+	INIT_WORK(&musb->irq_work, musb_irq_work);
+
 	/* setup musb parts of the core (especially endpoints) */
 	status = musb_core_init(plat->config->multipoint
 			? MUSB_CONTROLLER_MHDRC
@@ -1900,9 +1903,6 @@ musb_init_controller(struct device *dev, int nIrq, void __iomem *ctrl)
 		goto fail3;
 
 	setup_timer(&musb->otg_timer, musb_otg_timer_func, (unsigned long) musb);
-
-	/* Init IRQ workqueue before request_irq */
-	INIT_WORK(&musb->irq_work, musb_irq_work);
 
 	/* attach to the IRQ */
 	if (request_irq(nIrq, musb->isr, 0, dev_name(dev), musb)) {
@@ -1946,6 +1946,8 @@ musb_init_controller(struct device *dev, int nIrq, void __iomem *ctrl)
 		if (status < 0)
 			goto fail3;
 		status = musb_gadget_setup(musb);
+		if (status)
+			musb_host_cleanup(musb);
 		break;
 	default:
 		dev_err(dev, "unsupported port mode %d\n", musb->port_mode);
@@ -1972,8 +1974,10 @@ fail5:
 
 fail4:
 	musb_gadget_cleanup(musb);
+	musb_host_cleanup(musb);
 
 fail3:
+	cancel_work_sync(&musb->irq_work);
 	if (musb->dma_controller)
 		dma_controller_destroy(musb->dma_controller);
 	pm_runtime_put_sync(musb->controller);
@@ -2032,6 +2036,10 @@ static int musb_remove(struct platform_device *pdev)
 	musb_exit_debugfs(musb);
 	musb_shutdown(pdev);
 
+	if (musb->dma_controller)
+		dma_controller_destroy(musb->dma_controller);
+
+	cancel_work_sync(&musb->irq_work);
 	musb_free(musb);
 	device_init_wakeup(dev, 0);
 	return 0;

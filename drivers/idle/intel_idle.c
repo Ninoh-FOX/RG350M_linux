@@ -1,7 +1,7 @@
 /*
  * intel_idle.c - native hardware idle loop for modern Intel processors
  *
- * Copyright (c) 2010, Intel Corporation.
+ * Copyright (c) 2013, Intel Corporation.
  * Len Brown <len.brown@intel.com>
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -296,6 +296,66 @@ static struct cpuidle_state hsw_cstates[CPUIDLE_STATE_MAX] = {
 	{
 		.enter = NULL }
 };
+static struct cpuidle_state bdw_cstates[] = {
+	{
+		.name = "C1-BDW",
+		.desc = "MWAIT 0x00",
+		.flags = MWAIT2flg(0x00) | CPUIDLE_FLAG_TIME_VALID,
+		.exit_latency = 2,
+		.target_residency = 2,
+		.enter = &intel_idle },
+	{
+		.name = "C1E-BDW",
+		.desc = "MWAIT 0x01",
+		.flags = MWAIT2flg(0x01) | CPUIDLE_FLAG_TIME_VALID,
+		.exit_latency = 10,
+		.target_residency = 20,
+		.enter = &intel_idle },
+	{
+		.name = "C3-BDW",
+		.desc = "MWAIT 0x10",
+		.flags = MWAIT2flg(0x10) | CPUIDLE_FLAG_TIME_VALID | CPUIDLE_FLAG_TLB_FLUSHED,
+		.exit_latency = 40,
+		.target_residency = 100,
+		.enter = &intel_idle },
+	{
+		.name = "C6-BDW",
+		.desc = "MWAIT 0x20",
+		.flags = MWAIT2flg(0x20) | CPUIDLE_FLAG_TIME_VALID | CPUIDLE_FLAG_TLB_FLUSHED,
+		.exit_latency = 133,
+		.target_residency = 400,
+		.enter = &intel_idle },
+	{
+		.name = "C7s-BDW",
+		.desc = "MWAIT 0x32",
+		.flags = MWAIT2flg(0x32) | CPUIDLE_FLAG_TIME_VALID | CPUIDLE_FLAG_TLB_FLUSHED,
+		.exit_latency = 166,
+		.target_residency = 500,
+		.enter = &intel_idle },
+	{
+		.name = "C8-BDW",
+		.desc = "MWAIT 0x40",
+		.flags = MWAIT2flg(0x40) | CPUIDLE_FLAG_TIME_VALID | CPUIDLE_FLAG_TLB_FLUSHED,
+		.exit_latency = 300,
+		.target_residency = 900,
+		.enter = &intel_idle },
+	{
+		.name = "C9-BDW",
+		.desc = "MWAIT 0x50",
+		.flags = MWAIT2flg(0x50) | CPUIDLE_FLAG_TIME_VALID | CPUIDLE_FLAG_TLB_FLUSHED,
+		.exit_latency = 600,
+		.target_residency = 1800,
+		.enter = &intel_idle },
+	{
+		.name = "C10-BDW",
+		.desc = "MWAIT 0x60",
+		.flags = MWAIT2flg(0x60) | CPUIDLE_FLAG_TIME_VALID | CPUIDLE_FLAG_TLB_FLUSHED,
+		.exit_latency = 2600,
+		.target_residency = 7700,
+		.enter = &intel_idle },
+	{
+		.enter = NULL }
+};
 
 static struct cpuidle_state atom_cstates[CPUIDLE_STATE_MAX] = {
 	{
@@ -325,6 +385,24 @@ static struct cpuidle_state atom_cstates[CPUIDLE_STATE_MAX] = {
 		.flags = MWAIT2flg(0x52) | CPUIDLE_FLAG_TIME_VALID | CPUIDLE_FLAG_TLB_FLUSHED,
 		.exit_latency = 140,
 		.target_residency = 560,
+		.enter = &intel_idle },
+	{
+		.enter = NULL }
+};
+static struct cpuidle_state avn_cstates[] = {
+	{
+		.name = "C1-AVN",
+		.desc = "MWAIT 0x00",
+		.flags = MWAIT2flg(0x00) | CPUIDLE_FLAG_TIME_VALID,
+		.exit_latency = 2,
+		.target_residency = 2,
+		.enter = &intel_idle },
+	{
+		.name = "C6-AVN",
+		.desc = "MWAIT 0x51",
+		.flags = MWAIT2flg(0x51) | CPUIDLE_FLAG_TIME_VALID | CPUIDLE_FLAG_TLB_FLUSHED,
+		.exit_latency = 15,
+		.target_residency = 45,
 		.enter = &intel_idle },
 	{
 		.enter = NULL }
@@ -359,7 +437,10 @@ static int intel_idle(struct cpuidle_device *dev,
 	if (!(lapic_timer_reliable_states & (1 << (cstate))))
 		clockevents_notify(CLOCK_EVT_NOTIFY_BROADCAST_ENTER, &cpu);
 
-	if (!need_resched()) {
+	if (!current_set_polling_and_test()) {
+
+		if (this_cpu_has(X86_FEATURE_CLFLUSH_MONITOR))
+			clflush((void *)&current_thread_info()->flags);
 
 		__monitor((void *)&current_thread_info()->flags, 0, 0);
 		smp_mb();
@@ -462,6 +543,16 @@ static const struct idle_cpu idle_cpu_hsw = {
 	.disable_promotion_to_c1e = true,
 };
 
+static const struct idle_cpu idle_cpu_bdw = {
+	.state_table = bdw_cstates,
+	.disable_promotion_to_c1e = true,
+};
+
+static const struct idle_cpu idle_cpu_avn = {
+	.state_table = avn_cstates,
+	.disable_promotion_to_c1e = true,
+};
+
 #define ICPU(model, cpu) \
 	{ X86_VENDOR_INTEL, 6, model, X86_FEATURE_MWAIT, (unsigned long)&cpu }
 
@@ -477,12 +568,18 @@ static const struct x86_cpu_id intel_idle_ids[] = {
 	ICPU(0x2f, idle_cpu_nehalem),
 	ICPU(0x2a, idle_cpu_snb),
 	ICPU(0x2d, idle_cpu_snb),
+	ICPU(0x36, idle_cpu_atom),
 	ICPU(0x3a, idle_cpu_ivb),
 	ICPU(0x3e, idle_cpu_ivb),
 	ICPU(0x3c, idle_cpu_hsw),
 	ICPU(0x3f, idle_cpu_hsw),
 	ICPU(0x45, idle_cpu_hsw),
 	ICPU(0x46, idle_cpu_hsw),
+	ICPU(0x4d, idle_cpu_avn),
+	ICPU(0x3d, idle_cpu_bdw),
+	ICPU(0x47, idle_cpu_bdw),
+	ICPU(0x4f, idle_cpu_bdw),
+	ICPU(0x56, idle_cpu_bdw),
 	{}
 };
 MODULE_DEVICE_TABLE(x86cpu, intel_idle_ids);

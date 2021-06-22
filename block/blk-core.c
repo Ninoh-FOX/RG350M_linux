@@ -645,10 +645,12 @@ struct request_queue *blk_alloc_queue_node(gfp_t gfp_mask, int node_id)
 	__set_bit(QUEUE_FLAG_BYPASS, &q->queue_flags);
 
 	if (blkcg_init_queue(q))
-		goto fail_id;
+		goto fail_bdi;
 
 	return q;
 
+fail_bdi:
+	bdi_destroy(&q->backing_dev_info);
 fail_id:
 	ida_simple_remove(&blk_queue_ida, q->id);
 fail_q:
@@ -739,9 +741,17 @@ blk_init_allocated_queue(struct request_queue *q, request_fn_proc *rfn,
 
 	q->sg_reserved_size = INT_MAX;
 
+	/* Protect q->elevator from elevator_change */
+	mutex_lock(&q->sysfs_lock);
+
 	/* init elevator */
-	if (elevator_init(q, NULL))
+	if (elevator_init(q, NULL)) {
+		mutex_unlock(&q->sysfs_lock);
 		return NULL;
+	}
+
+	mutex_unlock(&q->sysfs_lock);
+
 	return q;
 }
 EXPORT_SYMBOL(blk_init_allocated_queue);
@@ -1883,7 +1893,8 @@ void submit_bio(int rw, struct bio *bio)
 EXPORT_SYMBOL(submit_bio);
 
 /**
- * blk_rq_check_limits - Helper function to check a request for the queue limit
+ * blk_cloned_rq_check_limits - Helper function to check a cloned request
+ *                              for new the queue limits
  * @q:  the queue
  * @rq: the request being checked
  *
@@ -1894,20 +1905,13 @@ EXPORT_SYMBOL(submit_bio);
  *    after it is inserted to @q, it should be checked against @q before
  *    the insertion using this generic function.
  *
- *    This function should also be useful for request stacking drivers
- *    in some cases below, so export this function.
  *    Request stacking drivers like request-based dm may change the queue
- *    limits while requests are in the queue (e.g. dm's table swapping).
- *    Such request stacking drivers should check those requests agaist
- *    the new queue limits again when they dispatch those requests,
- *    although such checkings are also done against the old queue limits
- *    when submitting requests.
+ *    limits when retrying requests on other queues. Those requests need
+ *    to be checked against the new queue limits again during dispatch.
  */
-int blk_rq_check_limits(struct request_queue *q, struct request *rq)
+static int blk_cloned_rq_check_limits(struct request_queue *q,
+				      struct request *rq)
 {
-	if (!rq_mergeable(rq))
-		return 0;
-
 	if (blk_rq_sectors(rq) > blk_queue_get_max_sectors(q, rq->cmd_flags)) {
 		printk(KERN_ERR "%s: over max size limit.\n", __func__);
 		return -EIO;
@@ -1927,7 +1931,6 @@ int blk_rq_check_limits(struct request_queue *q, struct request *rq)
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(blk_rq_check_limits);
 
 /**
  * blk_insert_cloned_request - Helper for stacking drivers to submit a request
@@ -1939,7 +1942,7 @@ int blk_insert_cloned_request(struct request_queue *q, struct request *rq)
 	unsigned long flags;
 	int where = ELEVATOR_INSERT_BACK;
 
-	if (blk_rq_check_limits(q, rq))
+	if (blk_cloned_rq_check_limits(q, rq))
 		return -EIO;
 
 	if (rq->rq_disk &&
@@ -2227,6 +2230,7 @@ void blk_start_request(struct request *req)
 	if (unlikely(blk_bidi_rq(req)))
 		req->next_rq->resid_len = blk_rq_bytes(req->next_rq);
 
+	BUG_ON(test_bit(REQ_ATOM_COMPLETE, &req->atomic_flags));
 	blk_add_timer(req);
 }
 EXPORT_SYMBOL(blk_start_request);
@@ -2286,7 +2290,7 @@ bool blk_update_request(struct request *req, int error, unsigned int nr_bytes)
 	if (!req->bio)
 		return false;
 
-	trace_block_rq_complete(req->q, req);
+	trace_block_rq_complete(req->q, req, nr_bytes);
 
 	/*
 	 * For fs requests, rq is just carrier of independent bio's
@@ -3093,6 +3097,9 @@ int blk_pre_runtime_suspend(struct request_queue *q)
 {
 	int ret = 0;
 
+	if (!q->dev)
+		return ret;
+
 	spin_lock_irq(q->queue_lock);
 	if (q->nr_pending) {
 		ret = -EBUSY;
@@ -3120,6 +3127,9 @@ EXPORT_SYMBOL(blk_pre_runtime_suspend);
  */
 void blk_post_runtime_suspend(struct request_queue *q, int err)
 {
+	if (!q->dev)
+		return;
+
 	spin_lock_irq(q->queue_lock);
 	if (!err) {
 		q->rpm_status = RPM_SUSPENDED;
@@ -3144,6 +3154,9 @@ EXPORT_SYMBOL(blk_post_runtime_suspend);
  */
 void blk_pre_runtime_resume(struct request_queue *q)
 {
+	if (!q->dev)
+		return;
+
 	spin_lock_irq(q->queue_lock);
 	q->rpm_status = RPM_RESUMING;
 	spin_unlock_irq(q->queue_lock);
@@ -3166,6 +3179,9 @@ EXPORT_SYMBOL(blk_pre_runtime_resume);
  */
 void blk_post_runtime_resume(struct request_queue *q, int err)
 {
+	if (!q->dev)
+		return;
+
 	spin_lock_irq(q->queue_lock);
 	if (!err) {
 		q->rpm_status = RPM_ACTIVE;

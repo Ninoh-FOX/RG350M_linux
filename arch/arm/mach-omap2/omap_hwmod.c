@@ -399,7 +399,7 @@ static int _set_clockactivity(struct omap_hwmod *oh, u8 clockact, u32 *v)
 }
 
 /**
- * _set_softreset: set OCP_SYSCONFIG.CLOCKACTIVITY bits in @v
+ * _set_softreset: set OCP_SYSCONFIG.SOFTRESET bit in @v
  * @oh: struct omap_hwmod *
  * @v: pointer to register contents to modify
  *
@@ -422,6 +422,36 @@ static int _set_softreset(struct omap_hwmod *oh, u32 *v)
 	softrst_mask = (0x1 << oh->class->sysc->sysc_fields->srst_shift);
 
 	*v |= softrst_mask;
+
+	return 0;
+}
+
+/**
+ * _clear_softreset: clear OCP_SYSCONFIG.SOFTRESET bit in @v
+ * @oh: struct omap_hwmod *
+ * @v: pointer to register contents to modify
+ *
+ * Clear the SOFTRESET bit in @v for hwmod @oh.  Returns -EINVAL upon
+ * error or 0 upon success.
+ */
+static int _clear_softreset(struct omap_hwmod *oh, u32 *v)
+{
+	u32 softrst_mask;
+
+	if (!oh->class->sysc ||
+	    !(oh->class->sysc->sysc_flags & SYSC_HAS_SOFTRESET))
+		return -EINVAL;
+
+	if (!oh->class->sysc->sysc_fields) {
+		WARN(1,
+		     "omap_hwmod: %s: sysc_fields absent for sysconfig class\n",
+		     oh->name);
+		return -EINVAL;
+	}
+
+	softrst_mask = (0x1 << oh->class->sysc->sysc_fields->srst_shift);
+
+	*v &= ~softrst_mask;
 
 	return 0;
 }
@@ -1405,9 +1435,7 @@ static void _enable_sysc(struct omap_hwmod *oh)
 	    (sf & SYSC_HAS_CLOCKACTIVITY))
 		_set_clockactivity(oh, oh->class->sysc->clockact, &v);
 
-	/* If the cached value is the same as the new value, skip the write */
-	if (oh->_sysc_cache != v)
-		_write_sysconfig(v, oh);
+	_write_sysconfig(v, oh);
 
 	/*
 	 * Set the autoidle bit only after setting the smartidle bit
@@ -1470,7 +1498,9 @@ static void _idle_sysc(struct omap_hwmod *oh)
 		_set_master_standbymode(oh, idlemode, &v);
 	}
 
-	_write_sysconfig(v, oh);
+	/* If the cached value is the same as the new value, skip the write */
+	if (oh->_sysc_cache != v)
+		_write_sysconfig(v, oh);
 }
 
 /**
@@ -1911,6 +1941,12 @@ static int _ocp_softreset(struct omap_hwmod *oh)
 	ret = _set_softreset(oh, &v);
 	if (ret)
 		goto dis_opt_clks;
+
+	_write_sysconfig(v, oh);
+	ret = _clear_softreset(oh, &v);
+	if (ret)
+		goto dis_opt_clks;
+
 	_write_sysconfig(v, oh);
 
 	if (oh->class->sysc->srst_udelay)
@@ -2143,6 +2179,8 @@ static int _enable(struct omap_hwmod *oh)
 			 oh->mux->pads_dynamic))) {
 		omap_hwmod_mux(oh->mux, _HWMOD_STATE_ENABLED);
 		_reconfigure_io_chain();
+	} else if (oh->flags & HWMOD_FORCE_MSTANDBY) {
+		_reconfigure_io_chain();
 	}
 
 	_add_initiator_dep(oh, mpu_oh);
@@ -2248,6 +2286,8 @@ static int _idle(struct omap_hwmod *oh)
 	/* Mux pins for device idle if populated */
 	if (oh->mux && oh->mux->pads_dynamic) {
 		omap_hwmod_mux(oh->mux, _HWMOD_STATE_IDLE);
+		_reconfigure_io_chain();
+	} else if (oh->flags & HWMOD_FORCE_MSTANDBY) {
 		_reconfigure_io_chain();
 	}
 
@@ -2361,21 +2401,31 @@ static struct device_node *of_dev_hwmod_lookup(struct device_node *np,
  * Cache the virtual address used by the MPU to access this IP block's
  * registers.  This address is needed early so the OCP registers that
  * are part of the device's address space can be ioremapped properly.
- * No return value.
+ *
+ * If SYSC access is not needed, the registers will not be remapped
+ * and non-availability of MPU access is not treated as an error.
+ *
+ * Returns 0 on success, -EINVAL if an invalid hwmod is passed, and
+ * -ENXIO on absent or invalid register target address space.
  */
-static void __init _init_mpu_rt_base(struct omap_hwmod *oh, void *data)
+static int __init _init_mpu_rt_base(struct omap_hwmod *oh, void *data)
 {
 	struct omap_hwmod_addr_space *mem;
 	void __iomem *va_start = NULL;
 	struct device_node *np;
 
 	if (!oh)
-		return;
+		return -EINVAL;
 
 	_save_mpu_port_index(oh);
 
+	/* if we don't need sysc access we don't need to ioremap */
+	if (!oh->class->sysc)
+		return 0;
+
+	/* we can't continue without MPU PORT if we need sysc access */
 	if (oh->_int_flags & _HWMOD_NO_MPU_PORT)
-		return;
+		return -ENXIO;
 
 	mem = _find_mpu_rt_addr_space(oh);
 	if (!mem) {
@@ -2383,8 +2433,10 @@ static void __init _init_mpu_rt_base(struct omap_hwmod *oh, void *data)
 			 oh->name);
 
 		/* Extract the IO space from device tree blob */
-		if (!of_have_populated_dt())
-			return;
+		if (!of_have_populated_dt()) {
+			pr_err("omap_hwmod: %s: no dt node\n", oh->name);
+			return -ENXIO;
+		}
 
 		np = of_dev_hwmod_lookup(of_find_node_by_name(NULL, "ocp"), oh);
 		if (np)
@@ -2395,13 +2447,14 @@ static void __init _init_mpu_rt_base(struct omap_hwmod *oh, void *data)
 
 	if (!va_start) {
 		pr_err("omap_hwmod: %s: Could not ioremap\n", oh->name);
-		return;
+		return -ENXIO;
 	}
 
 	pr_debug("omap_hwmod: %s: MPU register target at va %p\n",
 		 oh->name, va_start);
 
 	oh->_mpu_rt_va = va_start;
+	return 0;
 }
 
 /**
@@ -2414,8 +2467,8 @@ static void __init _init_mpu_rt_base(struct omap_hwmod *oh, void *data)
  * registered at this point.  This is the first of two phases for
  * hwmod initialization.  Code called here does not touch any hardware
  * registers, it simply prepares internal data structures.  Returns 0
- * upon success or if the hwmod isn't registered, or -EINVAL upon
- * failure.
+ * upon success or if the hwmod isn't registered or if the hwmod's
+ * address space is not defined, or -EINVAL upon failure.
  */
 static int __init _init(struct omap_hwmod *oh, void *data)
 {
@@ -2424,8 +2477,12 @@ static int __init _init(struct omap_hwmod *oh, void *data)
 	if (oh->_state != _HWMOD_STATE_REGISTERED)
 		return 0;
 
-	if (oh->class->sysc)
-		_init_mpu_rt_base(oh, NULL);
+	r = _init_mpu_rt_base(oh, NULL);
+	if (r < 0) {
+		WARN(1, "omap_hwmod: %s: doesn't have mpu register target base\n",
+		     oh->name);
+		return 0;
+	}
 
 	r = _init_clocks(oh, NULL);
 	if (r < 0) {
@@ -3146,6 +3203,11 @@ int omap_hwmod_softreset(struct omap_hwmod *oh)
 
 	v = oh->_sysc_cache;
 	ret = _set_softreset(oh, &v);
+	if (ret)
+		goto error;
+	_write_sysconfig(v, oh);
+
+	ret = _clear_softreset(oh, &v);
 	if (ret)
 		goto error;
 	_write_sysconfig(v, oh);

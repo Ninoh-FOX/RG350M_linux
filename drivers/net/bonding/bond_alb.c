@@ -694,7 +694,7 @@ static struct slave *rlb_choose_channel(struct sk_buff *skb, struct bonding *bon
 			client_info->ntt = 0;
 		}
 
-		if (!vlan_get_tag(skb, &client_info->vlan_id))
+		if (vlan_get_tag(skb, &client_info->vlan_id))
 			client_info->vlan_id = 0;
 
 		if (!client_info->assigned) {
@@ -1447,7 +1447,7 @@ int bond_alb_xmit(struct sk_buff *skb, struct net_device *bond_dev)
 	read_unlock(&bond->lock);
 	if (res) {
 		/* no suitable interface, frame not sent */
-		kfree_skb(skb);
+		dev_kfree_skb_any(skb);
 	}
 
 	return NETDEV_TX_OK;

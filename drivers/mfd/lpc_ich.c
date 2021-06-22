@@ -53,6 +53,7 @@
  *	document number TBD : Wellsburg
  *	document number TBD : Avoton SoC
  *	document number TBD : Coleto Creek
+ *	document number TBD : Wildcat Point-LP
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -211,6 +212,7 @@ enum lpc_chipsets {
 	LPC_WBG,	/* Wellsburg */
 	LPC_AVN,	/* Avoton SoC */
 	LPC_COLETO,	/* Coleto Creek */
+	LPC_WPT_LP,	/* Wildcat Point-LP */
 };
 
 static struct lpc_ich_info lpc_chipset_info[] = {
@@ -503,6 +505,10 @@ static struct lpc_ich_info lpc_chipset_info[] = {
 		.name = "Coleto Creek",
 		.iTCO_version = 2,
 	},
+	[LPC_WPT_LP] = {
+		.name = "Lynx Point_LP",
+		.iTCO_version = 2,
+	},
 };
 
 /*
@@ -721,6 +727,13 @@ static DEFINE_PCI_DEVICE_TABLE(lpc_ich_ids) = {
 	{ PCI_VDEVICE(INTEL, 0x1f3a), LPC_AVN},
 	{ PCI_VDEVICE(INTEL, 0x1f3b), LPC_AVN},
 	{ PCI_VDEVICE(INTEL, 0x2390), LPC_COLETO},
+	{ PCI_VDEVICE(INTEL, 0x9cc1), LPC_WPT_LP},
+	{ PCI_VDEVICE(INTEL, 0x9cc2), LPC_WPT_LP},
+	{ PCI_VDEVICE(INTEL, 0x9cc3), LPC_WPT_LP},
+	{ PCI_VDEVICE(INTEL, 0x9cc5), LPC_WPT_LP},
+	{ PCI_VDEVICE(INTEL, 0x9cc6), LPC_WPT_LP},
+	{ PCI_VDEVICE(INTEL, 0x9cc7), LPC_WPT_LP},
+	{ PCI_VDEVICE(INTEL, 0x9cc9), LPC_WPT_LP},
 	{ 0, },			/* End of list */
 };
 MODULE_DEVICE_TABLE(pci, lpc_ich_ids);
@@ -859,8 +872,8 @@ gpe0_done:
 	lpc_ich_enable_gpio_space(dev);
 
 	lpc_ich_finalize_cell(dev, &lpc_ich_cells[LPC_GPIO]);
-	ret = mfd_add_devices(&dev->dev, -1, &lpc_ich_cells[LPC_GPIO],
-			      1, NULL, 0, NULL);
+	ret = mfd_add_devices(&dev->dev, PLATFORM_DEVID_AUTO,
+			      &lpc_ich_cells[LPC_GPIO], 1, NULL, 0, NULL);
 
 gpio_done:
 	if (acpi_conflict)
@@ -919,8 +932,8 @@ static int lpc_ich_init_wdt(struct pci_dev *dev)
 	}
 
 	lpc_ich_finalize_cell(dev, &lpc_ich_cells[LPC_WDT]);
-	ret = mfd_add_devices(&dev->dev, -1, &lpc_ich_cells[LPC_WDT],
-			      1, NULL, 0, NULL);
+	ret = mfd_add_devices(&dev->dev, PLATFORM_DEVID_AUTO,
+			      &lpc_ich_cells[LPC_WDT], 1, NULL, 0, NULL);
 
 wdt_done:
 	return ret;

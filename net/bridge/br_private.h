@@ -265,6 +265,7 @@ struct net_bridge
 	u8				multicast_disabled:1;
 	u8				multicast_querier:1;
 	u8				multicast_query_use_ifaddr:1;
+	u8				has_ipv6_addr:1;
 
 	u32				hash_elasticity;
 	u32				hash_max;
@@ -308,6 +309,9 @@ struct br_input_skb_cb {
 #ifdef CONFIG_BRIDGE_IGMP_SNOOPING
 	int igmp;
 	int mrouters_only;
+#endif
+#ifdef CONFIG_BRIDGE_VLAN_FILTERING
+	bool vlan_filtered;
 #endif
 };
 
@@ -442,6 +446,16 @@ extern netdev_features_t br_features_recompute(struct net_bridge *br,
 extern int br_handle_frame_finish(struct sk_buff *skb);
 extern rx_handler_result_t br_handle_frame(struct sk_buff **pskb);
 
+static inline bool br_rx_handler_check_rcu(const struct net_device *dev)
+{
+	return rcu_dereference(dev->rx_handler) == br_handle_frame;
+}
+
+static inline struct net_bridge_port *br_port_get_check_rcu(const struct net_device *dev)
+{
+	return br_rx_handler_check_rcu(dev) ? br_port_get_rcu(dev) : NULL;
+}
+
 /* br_ioctl.c */
 extern int br_dev_ioctl(struct net_device *dev, struct ifreq *rq, int cmd);
 extern int br_ioctl_deviceless_stub(struct net *net, unsigned int cmd, void __user *arg);
@@ -499,10 +513,22 @@ static inline bool br_multicast_is_router(struct net_bridge *br)
 
 static inline bool
 __br_multicast_querier_exists(struct net_bridge *br,
-			      struct bridge_mcast_querier *querier)
+				struct bridge_mcast_querier *querier,
+				const bool is_ipv6)
 {
+	bool own_querier_enabled;
+
+	if (br->multicast_querier) {
+		if (is_ipv6 && !br->has_ipv6_addr)
+			own_querier_enabled = false;
+		else
+			own_querier_enabled = true;
+	} else {
+		own_querier_enabled = false;
+	}
+
 	return time_is_before_jiffies(querier->delay_time) &&
-	       (br->multicast_querier || timer_pending(&querier->timer));
+	       (own_querier_enabled || timer_pending(&querier->timer));
 }
 
 static inline bool br_multicast_querier_exists(struct net_bridge *br,
@@ -510,10 +536,12 @@ static inline bool br_multicast_querier_exists(struct net_bridge *br,
 {
 	switch (eth->h_proto) {
 	case (htons(ETH_P_IP)):
-		return __br_multicast_querier_exists(br, &br->ip4_querier);
+		return __br_multicast_querier_exists(br,
+			&br->ip4_querier, false);
 #if IS_ENABLED(CONFIG_IPV6)
 	case (htons(ETH_P_IPV6)):
-		return __br_multicast_querier_exists(br, &br->ip6_querier);
+		return __br_multicast_querier_exists(br,
+			&br->ip6_querier, true);
 #endif
 	default:
 		return false;
@@ -595,6 +623,7 @@ extern bool br_allowed_ingress(struct net_bridge *br, struct net_port_vlans *v,
 extern bool br_allowed_egress(struct net_bridge *br,
 			      const struct net_port_vlans *v,
 			      const struct sk_buff *skb);
+bool br_should_learn(struct net_bridge_port *p, struct sk_buff *skb, u16 *vid);
 extern struct sk_buff *br_handle_vlan(struct net_bridge *br,
 				      const struct net_port_vlans *v,
 				      struct sk_buff *skb);
@@ -657,6 +686,12 @@ static inline bool br_allowed_ingress(struct net_bridge *br,
 static inline bool br_allowed_egress(struct net_bridge *br,
 				     const struct net_port_vlans *v,
 				     const struct sk_buff *skb)
+{
+	return true;
+}
+
+static inline bool br_should_learn(struct net_bridge_port *p,
+				   struct sk_buff *skb, u16 *vid)
 {
 	return true;
 }

@@ -70,11 +70,6 @@
 #define SERVER_NAME_LENGTH 40
 #define SERVER_NAME_LEN_WITH_NULL     (SERVER_NAME_LENGTH + 1)
 
-/* used to define string lengths for reversing unicode strings */
-/*         (256+1)*2 = 514                                     */
-/*           (max path length + 1 for null) * 2 for unicode    */
-#define MAX_NAME 514
-
 /* SMB echo "timeout" -- FIXME: tunable? */
 #define SMB_ECHO_INTERVAL (60 * HZ)
 
@@ -228,6 +223,8 @@ struct smb_version_operations {
 	/* verify the message */
 	int (*check_message)(char *, unsigned int);
 	bool (*is_oplock_break)(char *, struct TCP_Server_Info *);
+	void (*downgrade_oplock)(struct TCP_Server_Info *,
+					struct cifsInodeInfo *, bool);
 	/* process transaction2 response */
 	bool (*check_trans2)(struct mid_q_entry *, struct TCP_Server_Info *,
 			     char *, int);
@@ -261,7 +258,7 @@ struct smb_version_operations {
 	/* query path data from the server */
 	int (*query_path_info)(const unsigned int, struct cifs_tcon *,
 			       struct cifs_sb_info *, const char *,
-			       FILE_ALL_INFO *, bool *);
+			       FILE_ALL_INFO *, bool *, bool *);
 	/* query file data from the server */
 	int (*query_file_info)(const unsigned int, struct cifs_tcon *,
 			       struct cifs_fid *, FILE_ALL_INFO *);
@@ -379,6 +376,19 @@ struct smb_version_operations {
 	char * (*create_lease_buf)(u8 *, u8);
 	/* parse lease context buffer and return oplock/epoch info */
 	__u8 (*parse_lease_buf)(void *, unsigned int *);
+	ssize_t (*query_all_EAs)(const unsigned int, struct cifs_tcon *,
+			const unsigned char *, const unsigned char *, char *,
+			size_t, const struct nls_table *, int);
+	int (*set_EA)(const unsigned int, struct cifs_tcon *, const char *,
+			const char *, const void *, const __u16,
+			const struct nls_table *, int);
+	struct cifs_ntsd * (*get_acl)(struct cifs_sb_info *, struct inode *,
+			const char *, u32 *);
+	int (*set_acl)(struct cifs_ntsd *, __u32, struct inode *, const char *,
+			int);
+	int (*validate_negotiate)(const unsigned int, struct cifs_tcon *);
+	/* check if we need to issue closedir */
+	bool (*dir_needs_close)(struct cifsFileInfo *);
 };
 
 struct smb_version_values {
@@ -534,6 +544,7 @@ struct TCP_Server_Info {
 	int echo_credits;  /* echo reserved slots */
 	int oplock_credits;  /* oplock break reserved slots */
 	bool echoes:1; /* enable echoes */
+	__u8 client_guid[SMB2_CLIENT_GUID_SIZE]; /* Client GUID */
 #endif
 	u16 dialect; /* dialect index that server chose */
 	bool oplocks:1; /* enable oplocks */
@@ -583,6 +594,8 @@ struct TCP_Server_Info {
 #ifdef CONFIG_CIFS_SMB2
 	unsigned int	max_read;
 	unsigned int	max_write;
+	struct delayed_work reconnect; /* reconnect workqueue job */
+	struct mutex reconnect_mutex; /* prevent simultaneous reconnects */
 #endif /* CONFIG_CIFS_SMB2 */
 };
 
@@ -749,7 +762,9 @@ cap_unix(struct cifs_ses *ses)
 struct cifs_tcon {
 	struct list_head tcon_list;
 	int tc_count;
+	struct list_head rlist; /* reconnect list */
 	struct list_head openFileList;
+	spinlock_t open_file_lock; /* protects list above */
 	struct cifs_ses *ses;	/* pointer to session associated with */
 	char treeName[MAX_TREE_SIZE + 1]; /* UNC name of resource in ASCII */
 	char *nativeFileSystem;
@@ -806,7 +821,7 @@ struct cifs_tcon {
 #endif /* CONFIG_CIFS_STATS2 */
 	__u64    bytes_read;
 	__u64    bytes_written;
-	spinlock_t stat_lock;
+	spinlock_t stat_lock;  /* protects the two fields above */
 #endif /* CONFIG_CIFS_STATS */
 	FILE_SYSTEM_DEVICE_INFO fsDevInfo;
 	FILE_SYSTEM_ATTRIBUTE_INFO fsAttrInfo; /* ok if fs name truncated */
@@ -822,7 +837,6 @@ struct cifs_tcon {
 	bool need_reconnect:1; /* connection reset, tid now invalid */
 #ifdef CONFIG_CIFS_SMB2
 	bool print:1;		/* set if connection to printer share */
-	bool bad_network_name:1; /* set if ret status STATUS_BAD_NETWORK_NAME */
 	__le32 capabilities;
 	__u32 share_flags;
 	__u32 maximal_access;
@@ -948,8 +962,10 @@ struct cifs_fid_locks {
 };
 
 struct cifsFileInfo {
+	/* following two lists are protected by tcon->open_file_lock */
 	struct list_head tlist;	/* pointer to next fid owned by tcon */
 	struct list_head flist;	/* next fid (file instance) for this inode */
+	/* lock list below protected by cifsi->lock_sem */
 	struct cifs_fid_locks *llist;	/* brlocks held by this fid */
 	kuid_t uid;		/* allows finding which FileInfo structure */
 	__u32 pid;		/* process id who opened file */
@@ -957,11 +973,12 @@ struct cifsFileInfo {
 	/* BB add lock scope info here if needed */ ;
 	/* lock scope id (0 if none) */
 	struct dentry *dentry;
-	unsigned int f_flags;
 	struct tcon_link *tlink;
+	unsigned int f_flags;
 	bool invalidHandle:1;	/* file closed via session abend */
 	bool oplock_break_cancelled:1;
-	int count;		/* refcount protected by cifs_file_list_lock */
+	int count;
+	spinlock_t file_info_lock; /* protects four flag/count fields above */
 	struct mutex fh_mutex; /* prevents reopen race after dead ses*/
 	struct cifs_search_info srch_inf;
 	struct work_struct oplock_break; /* work for oplock breaks */
@@ -1025,7 +1042,7 @@ struct cifs_writedata {
 
 /*
  * Take a reference on the file private data. Must be called with
- * cifs_file_list_lock held.
+ * cfile->file_info_lock held.
  */
 static inline void
 cifsFileInfo_get_locked(struct cifsFileInfo *cifs_file)
@@ -1062,6 +1079,12 @@ struct cifsInodeInfo {
 	unsigned int epoch;		/* used to track lease state changes */
 	bool delete_pending;		/* DELETE_ON_CLOSE is set */
 	bool invalid_mapping;		/* pagecache is invalid */
+	unsigned long flags;
+#define CIFS_INODE_PENDING_OPLOCK_BREAK   (0) /* oplock break in progress */
+#define CIFS_INODE_PENDING_WRITERS	  (1) /* Writes in progress */
+#define CIFS_INODE_DOWNGRADE_OPLOCK_TO_L2 (2) /* Downgrade oplock to L2 */
+	spinlock_t writers_lock;
+	unsigned int writers;		/* Number of writers on this inode */
 	unsigned long time;		/* jiffies of last update of inode */
 	u64  server_eof;		/* current file size on server -- protected by i_lock */
 	u64  uniqueid;			/* server inode number */
@@ -1405,8 +1428,10 @@ require use of the stronger protocol */
  *  GlobalMid_Lock protects:
  *	list operations on pending_mid_q and oplockQ
  *      updates to XID counters, multiplex id  and SMB sequence numbers
- *  cifs_file_list_lock protects:
- *	list operations on tcp and SMB session lists and tCon lists
+ *  tcp_ses_lock protects:
+ *	list operations on tcp and SMB session lists
+ *  tcon->open_file_lock protects the list of open files hanging off the tcon
+ *  cfile->file_info_lock protects counters and fields in cifs file struct
  *  f_owner.lock protects certain per file struct operations
  *  mapping->page_lock protects certain per page operations
  *
@@ -1438,17 +1463,11 @@ GLOBAL_EXTERN struct list_head		cifs_tcp_ses_list;
  * tcp session, and the list of tcon's per smb session. It also protects
  * the reference counters for the server, smb session, and tcon. Finally,
  * changes to the tcon->tidStatus should be done while holding this lock.
+ * generally the locks should be taken in order tcp_ses_lock before
+ * tcon->open_file_lock and that before file->file_info_lock since the
+ * structure order is cifs_socket-->cifs_ses-->cifs_tcon-->cifs_file
  */
 GLOBAL_EXTERN spinlock_t		cifs_tcp_ses_lock;
-
-/*
- * This lock protects the cifs_file->llist and cifs_file->flist
- * list operations, and updates to some flags (cifs_file->invalidHandle)
- * It will be moved to either use the tcon->stat_lock or equivalent later.
- * If cifs_tcp_ses_lock and the lock below are both needed to be held, then
- * the cifs_tcp_ses_lock must be grabbed first and released last.
- */
-GLOBAL_EXTERN spinlock_t	cifs_file_list_lock;
 
 #ifdef CONFIG_CIFS_DNOTIFY_EXPERIMENTAL /* unused temporarily */
 /* Outstanding dir notify requests */

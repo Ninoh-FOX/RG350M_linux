@@ -203,18 +203,15 @@ static void __init intel_remapping_check(int num, int slot, int func)
 	revision = read_pci_config_byte(num, slot, func, PCI_REVISION_ID);
 
 	/*
- 	 * Revision 13 of all triggering devices id in this quirk have
-	 * a problem draining interrupts when irq remapping is enabled,
-	 * and should be flagged as broken.  Additionally revisions 0x12
-	 * and 0x22 of device id 0x3405 has this problem.
+	 * Revision <= 13 of all triggering devices id in this quirk
+	 * have a problem draining interrupts when irq remapping is
+	 * enabled, and should be flagged as broken. Additionally
+	 * revision 0x22 of device id 0x3405 has this problem.
 	 */
-	if (revision == 0x13)
+	if (revision <= 0x13)
 		set_irq_remapping_broken();
-	else if ((device == 0x3405) &&
-	    ((revision == 0x12) ||
-	     (revision == 0x22)))
+	else if (device == 0x3405 && revision == 0x22)
 		set_irq_remapping_broken();
-
 }
 
 /*
@@ -320,8 +317,8 @@ static struct pci_device_id intel_stolen_ids[] __initdata = {
 	INTEL_I915GM_IDS(gen3_stolen_size),
 	INTEL_I945G_IDS(gen3_stolen_size),
 	INTEL_I945GM_IDS(gen3_stolen_size),
-	INTEL_VLV_M_IDS(gen3_stolen_size),
-	INTEL_VLV_D_IDS(gen3_stolen_size),
+	INTEL_VLV_M_IDS(gen6_stolen_size),
+	INTEL_VLV_D_IDS(gen6_stolen_size),
 	INTEL_PINEVIEW_IDS(gen3_stolen_size),
 	INTEL_I965G_IDS(gen3_stolen_size),
 	INTEL_G33_IDS(gen3_stolen_size),

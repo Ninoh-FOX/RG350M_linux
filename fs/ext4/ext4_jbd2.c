@@ -87,8 +87,14 @@ int __ext4_journal_stop(const char *where, unsigned int line, handle_t *handle)
 		ext4_put_nojournal(handle);
 		return 0;
 	}
-	sb = handle->h_transaction->t_journal->j_private;
+
 	err = handle->h_err;
+	if (!handle->h_transaction) {
+		rc = jbd2_journal_stop(handle);
+		return err ? err : rc;
+	}
+
+	sb = handle->h_transaction->t_journal->j_private;
 	rc = jbd2_journal_stop(handle);
 
 	if (!err)
@@ -259,6 +265,15 @@ int __ext4_handle_dirty_metadata(const char *where, unsigned int line,
 		if (WARN_ON_ONCE(err)) {
 			ext4_journal_abort_handle(where, line, __func__, bh,
 						  handle, err);
+			ext4_error_inode(inode, where, line,
+					 bh->b_blocknr,
+					 "journal_dirty_metadata failed: "
+					 "handle type %u started at line %u, "
+					 "credits %u/%u, errcode %d",
+					 handle->h_type,
+					 handle->h_line_no,
+					 handle->h_requested_credits,
+					 handle->h_buffer_credits, err);
 		}
 	} else {
 		if (inode)

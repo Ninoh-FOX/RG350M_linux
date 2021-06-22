@@ -74,8 +74,17 @@ static void for_each_companion(struct pci_dev *pdev, struct usb_hcd *hcd,
 		if (companion->bus != pdev->bus ||
 				PCI_SLOT(companion->devfn) != slot)
 			continue;
+
+		/*
+		 * Companion device should be either UHCI,OHCI or EHCI host
+		 * controller, otherwise skip.
+		 */
+		if (companion->class != CL_UHCI && companion->class != CL_OHCI &&
+				companion->class != CL_EHCI)
+			continue;
+
 		companion_hcd = pci_get_drvdata(companion);
-		if (!companion_hcd)
+		if (!companion_hcd || !companion_hcd->self.root_hub)
 			continue;
 		fn(pdev, hcd, companion, companion_hcd);
 	}
@@ -198,7 +207,7 @@ int usb_hcd_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 	 * The xHCI driver has its own irq management
 	 * make sure irq setup is not touched for xhci in generic hcd code
 	 */
-	if ((driver->flags & HCD_MASK) != HCD_USB3) {
+	if ((driver->flags & HCD_MASK) < HCD_USB3) {
 		if (!dev->irq) {
 			dev_err(&dev->dev,
 			"Found HC with no IRQ. Check BIOS/PCI %s setup!\n",
@@ -214,6 +223,9 @@ int usb_hcd_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 		retval = -ENOMEM;
 		goto disable_pci;
 	}
+
+	hcd->amd_resume_bug = (usb_hcd_amd_remote_wakeup_quirk(dev) &&
+			driver->flags & (HCD_USB11 | HCD_USB3)) ? 1 : 0;
 
 	if (driver->flags & HCD_MEMORY) {
 		/* EHCI, OHCI */
@@ -377,6 +389,8 @@ void usb_hcd_pci_shutdown(struct pci_dev *dev)
 	if (test_bit(HCD_FLAG_HW_ACCESSIBLE, &hcd->flags) &&
 			hcd->driver->shutdown) {
 		hcd->driver->shutdown(hcd);
+		if (usb_hcd_is_primary_hcd(hcd) && hcd->irq > 0)
+			free_irq(hcd->irq, hcd);
 		pci_disable_device(dev);
 	}
 }
