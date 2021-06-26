@@ -187,6 +187,9 @@ static int jzfb_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
 	else if (fb->var.bits_per_pixel == 16)
 		((u32 *)fb->pseudo_palette)[regno] =
 			(red & 0xf800) | ((green & 0xfc00) >> 5) | (blue >> 11);
+	else if (fb->var.bits_per_pixel == 24)
+		((u32 *)fb->pseudo_palette)[regno] =
+			((red & 0xff00) << 8) | (green & 0xff00) | (blue >> 8);
 	else
 		((u32 *)fb->pseudo_palette)[regno] =
 			((red & 0xff00) << 8) | (green & 0xff00) | (blue >> 8);
@@ -318,12 +321,27 @@ static int jzfb_check_var(struct fb_var_screeninfo *var, struct fb_info *fb)
 			var->blue.offset = 0;
 		}
 		break;
+			
+		case 24:
+		var->transp.offset = 24;
+		var->transp.length = var->red.length =
+				var->green.length = var->blue.length = 8;
+
+		/* Force conventional RGB ordering, unless BGR is requested. */
+		if (var->blue.offset != 16 || var->green.offset != 8 ||
+				var->red.offset != 0) {
+			var->red.offset = 16;
+			var->green.offset = 8;
+			var->blue.offset = 0;
+		}
+		break;
 		
 		default:
 		/* Force 32bpp if it's not already */
 		var->bits_per_pixel = 32;
 
 		var->transp.offset = 24;
+		var->transp.length = 8;
 		var->transp.length = var->red.length =
 				var->green.length = var->blue.length = 8;
 
