@@ -206,7 +206,7 @@ static int psb_gtt_attach_pages(struct gtt_range *gt)
 
 	WARN_ON(gt->pages);
 
-	pages = drm_gem_get_pages(&gt->gem, 0);
+	pages = drm_gem_get_pages(&gt->gem);
 	if (IS_ERR(pages))
 		return PTR_ERR(pages);
 
@@ -425,6 +425,7 @@ int psb_gtt_init(struct drm_device *dev, int resume)
 
 	if (!resume) {
 		mutex_init(&dev_priv->gtt_mutex);
+		mutex_init(&dev_priv->mmap_mutex);
 		psb_gtt_alloc(dev);
 	}
 

@@ -290,7 +290,7 @@ static int mdfld_dsi_connector_set_property(struct drm_connector *connector,
 						encoder->crtc->primary->fb))
 					goto set_prop_error;
 			} else {
-				struct drm_encoder_helper_funcs *funcs =
+				const struct drm_encoder_helper_funcs *funcs =
 						encoder->helper_private;
 				funcs->mode_set(encoder,
 					&gma_crtc->saved_mode,
@@ -318,7 +318,7 @@ static void mdfld_dsi_connector_destroy(struct drm_connector *connector)
 
 	if (!dsi_connector)
 		return;
-	drm_sysfs_connector_remove(connector);
+	drm_connector_unregister(connector);
 	drm_connector_cleanup(connector);
 	sender = dsi_connector->pkg_sender;
 	mdfld_dsi_pkg_sender_destroy(sender);
@@ -405,8 +405,6 @@ static struct drm_encoder *mdfld_dsi_connector_best_encoder(
 /*DSI connector funcs*/
 static const struct drm_connector_funcs mdfld_dsi_connector_funcs = {
 	.dpms = /*drm_helper_connector_dpms*/mdfld_dsi_connector_dpms,
-	.save = mdfld_dsi_connector_save,
-	.restore = mdfld_dsi_connector_restore,
 	.detect = mdfld_dsi_connector_detect,
 	.fill_modes = drm_helper_probe_single_connector_modes,
 	.set_property = mdfld_dsi_connector_set_property,
@@ -563,6 +561,9 @@ void mdfld_dsi_output_init(struct drm_device *dev,
 
 
 	connector = &dsi_connector->base.base;
+	dsi_connector->base.save = mdfld_dsi_connector_save;
+	dsi_connector->base.restore = mdfld_dsi_connector_restore;
+
 	drm_connector_init(dev, connector, &mdfld_dsi_connector_funcs,
 						DRM_MODE_CONNECTOR_LVDS);
 	drm_connector_helper_add(connector, &mdfld_dsi_connector_helper_funcs);
@@ -597,7 +598,7 @@ void mdfld_dsi_output_init(struct drm_device *dev,
 	dsi_config->encoder = encoder;
 	encoder->base.type = (pipe == 0) ? INTEL_OUTPUT_MIPI :
 		INTEL_OUTPUT_MIPI2;
-	drm_sysfs_connector_add(connector);
+	drm_connector_register(connector);
 	return;
 
 	/*TODO: add code to destroy outputs on error*/
