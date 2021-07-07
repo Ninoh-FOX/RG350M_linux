@@ -774,7 +774,7 @@ int drm_calc_vbltimestamp_from_scanoutpos(struct drm_device *dev,
 					  const struct drm_display_mode *mode)
 {
 	struct timeval tv_etime;
-	ktime_t stime, etime;
+	ktime_t stime, etime, mono_time_offset;
 	unsigned int vbl_status;
 	int ret = DRM_VBLANKTIME_SCANOUTPOS_METHOD;
 	int vpos, hpos, i;
@@ -854,9 +854,11 @@ int drm_calc_vbltimestamp_from_scanoutpos(struct drm_device *dev,
 	 */
 	delta_ns = div_s64(1000000LL * (vpos * mode->crtc_htotal + hpos),
 			   mode->crtc_clock);
+	etime = ktime_get();
+	if (!drm_timestamp_monotonic)
+		mono_time_offset = ktime_get_monotonic_offset();
 
-//	if (!drm_timestamp_monotonic)
-//		etime = ktime_mono_to_real(etime);
+	preempt_enable();
 
 	/* save this only for debugging purposes */
 	tv_etime = ktime_to_timeval(etime);
