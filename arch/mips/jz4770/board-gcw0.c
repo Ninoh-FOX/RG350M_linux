@@ -462,7 +462,7 @@ static struct i2c_board_info gcw0_i2c0_devs[] __initdata = {
 
 /* We don't have a use for the INT pin yet. */
 #define GPIO_MXC6225_INT	JZ_GPIO_PORTF(13)
-static struct i2c_board_info gcw0_i2c1_devs[] __initdata = {
+//static struct i2c_board_info gcw0_i2c1_devs[] __initdata = {
 /* the RG/PGv2 MXC6225_INT is on this bus, but the consoles don't has this chip, this is in module */
 	// {
 		// .type		= "mxc6225",
@@ -470,7 +470,7 @@ static struct i2c_board_info gcw0_i2c1_devs[] __initdata = {
 	// },
 };
 
-static struct i2c_board_info gcw0_i2c3_devs[] __initdata = {
+//static struct i2c_board_info gcw0_i2c3_devs[] __initdata = {
 /*the RG/PGv2 has CPU warnig kernel with this driver, this is on this bus. */
 	// {
 		// .type		= ACT8600_NAME,
@@ -485,13 +485,13 @@ static struct i2c_board_info gcw0_i2c4_devs[] __initdata = {
 
 /* I2C busses */
 
-//static struct i2c_jz4770_platform_data gcw0_i2c0_platform_data __initdata = {
-//	.use_dma		= false,
-//};
+static struct i2c_jz4770_platform_data gcw0_i2c0_platform_data __initdata = {
+	.use_dma		= false,
+};
 
-//static struct i2c_jz4770_platform_data gcw0_i2c1_platform_data __initdata = {
-//	.use_dma		= false,
-//};
+static struct i2c_jz4770_platform_data gcw0_i2c1_platform_data __initdata = {
+	.use_dma		= false,
+};
 
 //#if I2C0_USE_HW == 0
 
@@ -867,12 +867,12 @@ static int __init gcw0_init_platform_devices(void)
 
 static void __init board_i2c_init(void)
 {
-//	jz4770_i2c0_device.dev.platform_data = &gcw0_i2c0_platform_data;
-//	jz4770_i2c1_device.dev.platform_data = &gcw0_i2c1_platform_data;
+	jz4770_i2c0_device.dev.platform_data = &gcw0_i2c0_platform_data;
+	jz4770_i2c1_device.dev.platform_data = &gcw0_i2c1_platform_data;
 
 	i2c_register_board_info(0, gcw0_i2c0_devs, ARRAY_SIZE(gcw0_i2c0_devs));
-	i2c_register_board_info(1, gcw0_i2c1_devs, ARRAY_SIZE(gcw0_i2c1_devs));
-	i2c_register_board_info(3, gcw0_i2c3_devs, ARRAY_SIZE(gcw0_i2c3_devs));
+//	i2c_register_board_info(1, gcw0_i2c1_devs, ARRAY_SIZE(gcw0_i2c1_devs));
+//	i2c_register_board_info(3, gcw0_i2c3_devs, ARRAY_SIZE(gcw0_i2c3_devs));
 	i2c_register_board_info(4, gcw0_i2c4_devs, ARRAY_SIZE(gcw0_i2c4_devs));
 }
 
