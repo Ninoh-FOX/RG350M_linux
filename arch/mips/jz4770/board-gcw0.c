@@ -468,7 +468,7 @@ static struct i2c_board_info gcw0_i2c0_devs[] __initdata = {
 		// .type		= "mxc6225",
 		// .addr		= MXC6225_I2C_ADDR,
 	// },
-};
+//};
 
 //static struct i2c_board_info gcw0_i2c3_devs[] __initdata = {
 /*the RG/PGv2 has CPU warnig kernel with this driver, this is on this bus. */
@@ -477,7 +477,7 @@ static struct i2c_board_info gcw0_i2c0_devs[] __initdata = {
 		// .addr		= ACT8600_I2C_ADDR,
 		// .platform_data	= &act8600_platform_pdata,
 	// },
-};
+//};
 
 static struct i2c_board_info gcw0_i2c4_devs[] __initdata = {
 	/* the IT6610 is on this bus, but we don't have a driver for it */
