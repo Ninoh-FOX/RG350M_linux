@@ -451,14 +451,14 @@ static struct jz_otg_board_data gcw0_otg_board_data = {
 //#define I2C1_USE_HW	0
 //#endif
 
-static struct i2c_board_info gcw0_i2c0_devs[] __initdata = {
+//static struct i2c_board_info gcw0_i2c0_devs[] __initdata = {
 /* the RG/PGv2 radio is on this bus, but the consoles don't has this chip */
 	//{
 		//.type		= "radio-rda5807",
 		//.addr		= RDA5807_I2C_ADDR,
 		//.platform_data	= &gcw0_rda5807_pdata,
 	//},
-};
+//};
 
 /* We don't have a use for the INT pin yet. */
 #define GPIO_MXC6225_INT	JZ_GPIO_PORTF(13)
@@ -870,7 +870,7 @@ static void __init board_i2c_init(void)
 	jz4770_i2c0_device.dev.platform_data = &gcw0_i2c0_platform_data;
 	jz4770_i2c1_device.dev.platform_data = &gcw0_i2c1_platform_data;
 
-	i2c_register_board_info(0, gcw0_i2c0_devs, ARRAY_SIZE(gcw0_i2c0_devs));
+//	i2c_register_board_info(0, gcw0_i2c0_devs, ARRAY_SIZE(gcw0_i2c0_devs));
 //	i2c_register_board_info(1, gcw0_i2c1_devs, ARRAY_SIZE(gcw0_i2c1_devs));
 //	i2c_register_board_info(3, gcw0_i2c3_devs, ARRAY_SIZE(gcw0_i2c3_devs));
 	i2c_register_board_info(4, gcw0_i2c4_devs, ARRAY_SIZE(gcw0_i2c4_devs));
