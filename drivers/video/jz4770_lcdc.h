@@ -78,7 +78,7 @@
   #define LCD_CFG_LCDPIN_LCD	(0x0 << LCD_CFG_LCDPIN_BIT)
   #define LCD_CFG_LCDPIN_SLCD	(0x1 << LCD_CFG_LCDPIN_BIT)
 #define LCD_CFG_TVEPEH		(1 << 30) /* TVE PAL enable extra halfline signal */
-//#define LCD_CFG_FUHOLD	(1 << 29) /* hold pixel clock when outFIFO underrun *//*keep this bit to 0*/
+#define LCD_CFG_FUHOLD	(1 << 29) /* hold pixel clock when outFIFO underrun *//*keep this bit to 0*/
 #define LCD_CFG_NEWDES		(1 << 28) /* use new descripter. old: 4words, new:8words */
 #define LCD_CFG_PALBP		(1 << 27) /* bypass data format and alpha blending */
 #define LCD_CFG_TVEN		(1 << 26) /* indicate the terminal is lcd or tv */
@@ -147,7 +147,7 @@
   #define LCD_CTRL_FRC_2	(2 << LCD_CTRL_FRC_BIT) /* 2 grayscale */
 #define LCD_CTRL_PDD_BIT	16  /* Load Palette Delay Counter */
 #define LCD_CTRL_PDD_MASK	(0xff << LCD_CTRL_PDD_BIT)
-//#define LCD_CTRL_VGA		(1 << 15) /* VGA interface enable *//*keep this bit to 0*/
+#define LCD_CTRL_VGA		(1 << 15) /* VGA interface enable *//*keep this bit to 0*/
 #define LCD_CTRL_DACTE		(1 << 14) /* DAC loop back test */
 #define LCD_CTRL_EOFM		(1 << 13) /* EOF interrupt mask */
 #define LCD_CTRL_SOFM		(1 << 12) /* SOF interrupt mask */
